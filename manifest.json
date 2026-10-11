@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "老章 Markdown → X Articles",
+  "version": "0.1.0",
+  "version_name": "0.1.0-alpha.1",
+  "description": "将本地 Markdown 自动导入 X Articles，包含标题、封面、正文图片、原生代码和表格。",
+  "permissions": ["clipboardWrite"],
+  "host_permissions": ["https://r2blog.zhanglearning.com/*", "https://r2.zhanglearning.com/*"],
+  "background": { "service_worker": "src/background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://x.com/*"],
+      "js": ["dist/content.js"],
+      "css": ["src/panel.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

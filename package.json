@@ -1,0 +1,23 @@
+{
+  "name": "zhangai-x-article-md-importer",
+  "version": "0.1.0-alpha.1",
+  "description": "Experimental local Chrome extension for importing Markdown into X Articles",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/tjxj/x-article-md-importer.git" },
+  "engines": { "node": ">=20" },
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/content.js --bundle --format=iife --target=chrome120 --outfile=dist/content.js",
+    "test": "node --test",
+    "bundle": "node scripts/make-bundle.mjs",
+    "package": "node scripts/package.mjs"
+  },
+  "dependencies": {
+    "markdown-it": "15.0.2"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "fflate": "0.8.3"
+  }
+}
