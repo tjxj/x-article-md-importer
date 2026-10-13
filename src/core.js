@@ -33,12 +33,17 @@ function filenameTitle(filename) {
     .trim();
 }
 
-function fullImageParagraph(tokens, position) {
+function imageOnlyParagraph(tokens, position) {
   if (tokens[position]?.type !== 'paragraph_open' || tokens[position + 1]?.type !== 'inline' || tokens[position + 2]?.type !== 'paragraph_close') return null;
-  const children = tokens[position + 1].children?.filter(token => token.type !== 'softbreak') ?? [];
-  if (children.length !== 1 || children[0].type !== 'image') return null;
-  const image = children[0];
-  return { src: image.attrGet('src'), alt: image.content || '', tokenCount: 3 };
+  const images = [];
+  for (const child of tokens[position + 1].children ?? []) {
+    if (child.type === 'softbreak' || child.type === 'hardbreak') continue;
+    if (child.type === 'text' && !child.content.trim()) continue;
+    if (child.type !== 'image') return null;
+    images.push({ src: child.attrGet('src'), alt: child.content || '' });
+  }
+  if (!images.length) return null;
+  return { images, tokenCount: 3 };
 }
 
 function visibleText(tokens) {
@@ -75,16 +80,18 @@ export function convertMarkdown(source, filename = 'article.md') {
 
   for (let i = 0; i < tokens.length; i++) {
     if (i === titleHeading) { i += 2; continue; }
-    const image = fullImageParagraph(tokens, i);
-    if (image) {
+    const imageParagraph = imageOnlyParagraph(tokens, i);
+    if (imageParagraph) {
       flush();
-      if (!cover && !firstTextSeen) cover = { src: image.src, alt: image.alt };
-      else {
-        const item = { type: 'image', src: image.src, alt: image.alt, number: images.length + 1 };
-        images.push(item);
-        segments.push(item);
+      for (const image of imageParagraph.images) {
+        if (!cover && !firstTextSeen) cover = { src: image.src, alt: image.alt };
+        else {
+          const item = { type: 'image', src: image.src, alt: image.alt, number: images.length + 1 };
+          images.push(item);
+          segments.push(item);
+        }
       }
-      i += image.tokenCount - 1;
+      i += imageParagraph.tokenCount - 1;
       continue;
     }
     const token = tokens[i];

@@ -30,6 +30,17 @@ test('将 Markdown 深层标题适配到 X 支持的两级标题', () => {
   assert.match(bundle.segments[0].html, /<h2>小章节<\/h2>/);
 });
 
+test('同一段里连续的图片都拆成独立图片步骤', () => {
+  const bundle = convertMarkdown('开头\n\n![](https://r2.zhanglearning.com/a.png)\n![](https://r2.zhanglearning.com/b.png)\n\n结尾', 'article.md');
+  assert.equal(bundle.cover, null);
+  assert.deepEqual(bundle.images.map(image => image.src), [
+    'https://r2.zhanglearning.com/a.png',
+    'https://r2.zhanglearning.com/b.png'
+  ]);
+  assert.deepEqual(bundle.segments.map(segment => segment.type), ['html', 'image', 'image', 'html']);
+  assert.equal(bundle.segments.some(segment => segment.html?.includes('<img')), false);
+});
+
 test('将反引号包裹的完整网址变成可点击链接', () => {
   const bundle = convertMarkdown('模型：`https://huggingface.co/example/model`', 'article.md');
   assert.match(bundle.segments[0].html, /<a href="https:\/\/huggingface.co\/example\/model">/);

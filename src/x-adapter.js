@@ -1,5 +1,5 @@
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-const clean = text => String(text || '').replace(/\s+/g, '');
+const clean = text => String(text || '').replace(/[\s\u200b\ufeff]+/g, '');
 const visible = element => element && element.getClientRects().length > 0;
 
 export async function waitFor(read, message, timeout = 20000) {
@@ -13,7 +13,12 @@ export async function waitFor(read, message, timeout = 20000) {
 }
 
 function textButton(root, names) {
-  return Array.from(root.querySelectorAll('button, [role="button"]')).find(element => visible(element) && names.includes(element.textContent.trim()) && !element.disabled);
+  const buttons = Array.from(root.querySelectorAll('button, [role="button"]')).filter(element => visible(element) && !element.disabled);
+  for (const name of names) {
+    const found = buttons.find(element => element.textContent.trim() === name || element.getAttribute('aria-label') === name);
+    if (found) return found;
+  }
+  return null;
 }
 
 function setValue(element, value) {
@@ -24,9 +29,59 @@ function setValue(element, value) {
 }
 
 function editor() {
-  const element = document.querySelector('[data-testid="composer"][contenteditable="true"]');
+  const element = document.querySelector('[data-testid="composer"][contenteditable="true"]')
+    || document.querySelector('[data-testid="articleBody"] [contenteditable="true"]')
+    || document.querySelector('[data-testid="articleBody"][contenteditable="true"]');
   if (!element) throw new Error('没有找到 X Articles 正文编辑器');
   return element;
+}
+
+function editorImages() {
+  return editor().querySelectorAll('section img, figure img, [data-block="true"] img');
+}
+
+function pageCommand(payload, timeout = 5000) {
+  const requestId = crypto.randomUUID();
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      window.removeEventListener('message', onMessage);
+      resolve({ ok: false, reason: '页面粘贴通道没有响应，请重新加载扩展后再试' });
+    }, timeout);
+    function onMessage(event) {
+      if (event.source !== window || event.origin !== location.origin) return;
+      const data = event.data;
+      if (!data || data.source !== 'zhang-xmd-result' || data.requestId !== requestId) return;
+      clearTimeout(timer);
+      window.removeEventListener('message', onMessage);
+      resolve(data);
+    }
+    window.addEventListener('message', onMessage);
+    window.postMessage({ source: 'zhang-xmd', requestId, ...payload }, location.origin);
+  });
+}
+
+function expectedText(html) {
+  return clean(new DOMParser().parseFromString(html, 'text/html').body.textContent);
+}
+
+function textLanded(before, expected) {
+  const actual = clean(editor().innerText);
+  if (!expected) return actual.length > before.length;
+  const head = expected.slice(0, Math.min(12, expected.length));
+  const tail = expected.slice(-Math.min(18, expected.length));
+  return actual.length > before.length && actual.includes(head) && actual.includes(tail);
+}
+
+async function waitLanded(before, expected, timeout) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (textLanded(before, expected)) {
+      await pause(220);
+      if (textLanded(before, expected)) return true;
+    }
+    await pause(80);
+  }
+  return false;
 }
 
 async function caretAtEnd() {
@@ -44,15 +99,33 @@ async function caretAtEnd() {
   selection.addRange(range);
   document.dispatchEvent(new Event('selectionchange', { bubbles: true }));
   element.dispatchEvent(new Event('select', { bubbles: true }));
-  await pause(100);
+  await pageCommand({ action: 'caret' }, 1200);
+  await pause(80);
+}
+
+function findMenuItem(names) {
+  const items = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"]'));
+  const exact = items.find(element => names.includes(element.textContent.trim()) || names.includes(element.getAttribute('aria-label') || ''));
+  if (exact) return exact;
+  return items.find(element => {
+    const label = `${element.getAttribute('aria-label') || ''} ${element.textContent || ''}`.replace(/\s+/g, ' ').trim().toLowerCase();
+    return names.some(name => {
+      const wanted = name.toLowerCase();
+      return label === wanted || label.startsWith(`${wanted} `) || label.startsWith(`${wanted}，`);
+    });
+  });
 }
 
 async function openInsert(names) {
   await caretAtEnd();
-  const button = document.querySelector('button[aria-label="Add Media"], button[aria-label="添加媒体"]');
+  const button = document.querySelector('button[aria-label="Add Media"], button[aria-label="添加媒体"]')
+    || Array.from(document.querySelectorAll('button, [role="button"]')).find(element => {
+      const label = (element.getAttribute('aria-label') || '').trim().toLowerCase();
+      return visible(element) && !element.disabled && (label.includes('add media') || label.includes('添加媒体'));
+    });
   if (!button) throw new Error('没有找到 X 的 Insert 菜单');
   button.click();
-  const item = await waitFor(() => Array.from(document.querySelectorAll('[role="menuitem"]')).find(element => names.includes(element.textContent.trim())), `没有找到 ${names[0]} 插入选项`);
+  const item = await waitFor(() => findMenuItem(names), `没有找到 ${names[0]} 插入选项`);
   item.click();
 }
 
@@ -63,7 +136,10 @@ async function modal() {
 function assignFile(input, file) {
   const transfer = new DataTransfer();
   transfer.items.add(file);
-  input.files = transfer.files;
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'files')?.set;
+  if (setter) setter.call(input, transfer.files);
+  else input.files = transfer.files;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
   input.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
@@ -74,20 +150,36 @@ async function settleMedia() {
   }, 'X 的媒体处理超过 60 秒，请查看草稿中的上传状态', 60000);
 }
 
-async function insertHtml(step) {
+async function systemPaste(html, text) {
+  if (!navigator.clipboard?.write || !window.ClipboardItem) throw new Error('浏览器剪贴板不可用');
+  const htmlDoc = `<!DOCTYPE html><html><body><!--StartFragment-->${html}<!--EndFragment--></body></html>`;
+  await navigator.clipboard.write([new ClipboardItem({
+    'text/html': new Blob([htmlDoc], { type: 'text/html' }),
+    'text/plain': new Blob([text], { type: 'text/plain' })
+  })]);
   await caretAtEnd();
-  const element = editor();
-  const before = clean(element.textContent);
-  const data = new DataTransfer();
-  data.setData('text/html', step.html);
-  data.setData('text/plain', step.text);
-  element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
-  const parsed = new DOMParser().parseFromString(step.html, 'text/html');
-  const expected = clean(parsed.body.textContent);
-  await waitFor(() => {
-    const actual = clean(editor().textContent);
-    return actual.length > before.length && actual.includes(expected.slice(-Math.min(48, expected.length)));
-  }, 'X 没有接受富文本粘贴，已保留当前草稿；可用面板中的分段复制继续', 5000);
+  editor().focus();
+  if (!document.execCommand('paste')) throw new Error('Chrome 没有执行扩展粘贴，请允许扩展读取剪贴板后重试');
+}
+
+async function insertHtml(step) {
+  const before = clean(editor().innerText);
+  const expected = clean(step.text) || expectedText(step.html);
+  const viaPage = await pageCommand({ action: 'paste', html: step.html, text: step.text });
+  if (await waitLanded(before, expected, viaPage?.ok ? 1600 : 400)) return;
+  if (clean(editor().innerText).length > before.length) {
+    if (await waitLanded(before, expected, 1200)) return;
+    throw new Error('正文已变化，但和当前段落不一致，已停止以免重复粘贴');
+  }
+  let clipboardError = '';
+  try {
+    await systemPaste(step.html, step.text);
+  } catch (error) {
+    clipboardError = error.message;
+  }
+  if (await waitLanded(before, expected, 4000)) return;
+  const detail = [viaPage?.reason, clipboardError].filter(Boolean).join('；');
+  throw new Error(`X 没有接受富文本粘贴${detail ? `（${detail}）` : ''}，已保留当前草稿；可用面板中的分段复制继续`);
 }
 
 async function insertCode(step) {
@@ -137,12 +229,12 @@ async function insertTable(step) {
 }
 
 async function insertImage(file) {
-  const before = editor().querySelectorAll('section img').length;
+  const before = editorImages().length;
   await openInsert(['Media', '媒体']);
   const dialog = await modal();
   const input = await waitFor(() => dialog.querySelector('input[type="file"]'), '没有找到正文图片上传入口');
   assignFile(input, file);
-  await waitFor(() => editor().querySelectorAll('section img').length > before, '正文图片没有完成上传', 60000);
+  await waitFor(() => editorImages().length > before, '正文图片没有完成上传', 60000);
   await settleMedia();
 }
 
@@ -151,7 +243,7 @@ async function insertCover(file) {
   if (!input) throw new Error('没有找到文章封面上传入口');
   assignFile(input, file);
   const dialog = await modal();
-  const apply = await waitFor(() => textButton(dialog, ['Apply', '应用']), '封面裁剪按钮未就绪', 30000);
+  const apply = await waitFor(() => textButton(dialog, ['Apply', '应用', 'Done', '完成', 'Save', '保存']), '封面裁剪按钮未就绪', 30000);
   apply.click();
   await waitFor(() => !document.contains(dialog), '封面裁剪弹窗没有关闭');
   await settleMedia();
@@ -176,6 +268,32 @@ export async function fetchImageFile(src, localFiles = []) {
   return new File([bytes], response.filename, { type: response.type });
 }
 
+function titleField() {
+  return document.querySelector('textarea[name="Article Title"]');
+}
+
+function bodyIsEmpty() {
+  try { return !clean(editor().innerText); } catch { return false; }
+}
+
+async function ensureDraft() {
+  const onEdit = /\/compose\/articles\/edit\/\d+/.test(location.pathname);
+  if (onEdit && titleField() && bodyIsEmpty()) return;
+  const create = document.querySelector('button[aria-label="create"], button[aria-label="Create"], button[aria-label="创建"]');
+  if (!create) throw new Error('请先回到 X Articles 列表，或打开一篇空白草稿，再导入');
+  const oldPath = location.pathname;
+  create.click();
+  await waitFor(() => {
+    const field = titleField();
+    if (!field || location.pathname === oldPath || !/\/compose\/articles\/edit\/\d+/.test(location.pathname)) return null;
+    if (field.value !== '') return null;
+    try {
+      if (clean(editor().innerText)) return null;
+    } catch { return null; }
+    return true;
+  }, '空白新草稿未出现，已停止导入以免覆盖现有内容');
+}
+
 export async function importArticle(bundle, { onProgress = () => {}, localFiles = [], signal } = {}) {
   const ensureActive = () => { if (signal?.aborted) throw new Error('导入已停止，当前草稿已保留'); };
   ensureActive();
@@ -186,16 +304,10 @@ export async function importArticle(bundle, { onProgress = () => {}, localFiles 
 
   ensureActive();
   onProgress('正在新建 X Article 草稿…');
-  const oldPath = location.pathname;
-  const create = document.querySelector('button[aria-label="create"]');
-  if (!create) throw new Error('请先回到 X Articles 列表或普通编辑模式，再导入');
-  create.click();
-  await waitFor(() => {
-    const titleField = document.querySelector('textarea[name="Article Title"]');
-    const bodyField = document.querySelector('[data-testid="composer"]');
-    return location.pathname !== oldPath && /\/compose\/articles\/edit\/\d+/.test(location.pathname) && titleField && titleField.value === '' && bodyField && !clean(bodyField.textContent);
-  }, '空白新草稿未出现，已停止导入以免覆盖现有内容');
-  setValue(document.querySelector('textarea[name="Article Title"]'), bundle.title);
+  await ensureDraft();
+  const field = titleField();
+  if (!field) throw new Error('没有找到 X Articles 标题框');
+  setValue(field, bundle.title);
   if (bundle.cover) {
     ensureActive();
     onProgress('正在上传封面…');
@@ -216,7 +328,7 @@ export async function importArticle(bundle, { onProgress = () => {}, localFiles 
   await waitFor(() => !/Saving|正在保存|保存中/i.test(document.querySelector('#detail-header')?.textContent || ''), 'X 尚未确认保存，请稍后查看草稿', 30000);
   const codeCount = editor().querySelectorAll('[data-testid="markdown-code-block"]').length;
   const tableCount = editor().querySelectorAll('section table').length;
-  const imageCount = editor().querySelectorAll('section img').length;
+  const imageCount = editorImages().length;
   if (codeCount !== bundle.statistics.code || tableCount !== bundle.statistics.tables || imageCount < bundle.statistics.images) throw new Error('导入后数量核对不一致，请检查草稿中的图片、代码或表格');
   return { url: location.href, codeCount, tableCount, imageCount };
 }

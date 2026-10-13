@@ -4,7 +4,7 @@
 
 适合在 Obsidian、Typora、VS Code 等工具里写文章的人。源码采用 MIT 协议，Markdown 解析基于 [markdown-it](https://github.com/markdown-it/markdown-it)。
 
-> **当前为实验版 `0.1.0-alpha.1`。** Markdown 转换测试和构建检查已通过；相同转换结果已通过 X 原生界面完成一次文章发布。扩展从选择文件到自动生成草稿的完整流程仍待实机验收，可能受 X 页面结构、语言或其他扩展影响。测试范围见 [TESTING.md](docs/TESTING.md)。
+> **当前版本 `0.1.1`。** Markdown 转换测试和构建检查已通过。正文写入会在页面上下文里调用 X 编辑器自己的粘贴处理；若编辑器仍不接收，再改走系统剪贴板。自动导入仍可能受 X 页面结构影响。测试范围见 [TESTING.md](docs/TESTING.md)。
 
 [下载安装包](https://github.com/tjxj/x-article-md-importer/releases) · [已发布文章示例](https://x.com/Changbeihai/status/2109304805965369575) · [反馈问题](https://github.com/tjxj/x-article-md-importer/issues)
 
@@ -74,7 +74,7 @@
 | 权限或数据 | 用途 |
 | --- | --- |
 | 在 `x.com` 运行内容脚本 | 显示导入面板，操作 Articles 编辑器的现有控件 |
-| `clipboardWrite` | 用户点击复制时，把富文本或代码放入剪贴板 |
+| `clipboardWrite` / `clipboardRead` | 复制富文本；自动导入时，若页面内粘贴未生效，则写入剪贴板并执行一次真实粘贴 |
 | 两个图床的访问权限 | 读取文章引用的图片；请求不携带登录凭据 |
 | 用户选中的 MD 和图片 | 本地解析；点击自动导入后，内容会作为草稿上传到 X |
 

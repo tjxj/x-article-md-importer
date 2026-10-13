@@ -1,6 +1,6 @@
 {
   "name": "zhangai-x-article-md-importer",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.1",
   "description": "Experimental local Chrome extension for importing Markdown into X Articles",
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/tjxj/x-article-md-importer.git" },

@@ -1,0 +1,151 @@
+if (!window.__zhangXmdBridge) {
+  window.__zhangXmdBridge = true;
+
+  const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const compact = text => String(text || '').replace(/[\s\u200b\ufeff]+/g, '');
+
+  function findEditor() {
+    return document.querySelector('[data-testid="composer"][contenteditable="true"]')
+      || document.querySelector('[data-testid="articleBody"] [contenteditable="true"]')
+      || document.querySelector('[data-testid="articleBody"][contenteditable="true"]');
+  }
+
+  function editorText() {
+    return compact(findEditor()?.innerText || '');
+  }
+
+  function moveCaretToEnd() {
+    const element = findEditor();
+    if (!element) return false;
+    element.focus();
+    const blocks = Array.from(element.querySelectorAll('[data-block="true"]')).filter(block => block.getAttribute('contenteditable') !== 'false');
+    const target = blocks.at(-1)?.querySelector('.public-DraftStyleDefault-block') || blocks.at(-1) || element;
+    const range = document.createRange();
+    range.selectNodeContents(target);
+    range.collapse(false);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event('selectionchange', { bubbles: true }));
+    return true;
+  }
+
+  function clipboardHtml(fragment) {
+    return `<!DOCTYPE html><html><body><!--StartFragment-->${fragment}<!--EndFragment--></body></html>`;
+  }
+
+  function richTransfer(html, text) {
+    const data = new DataTransfer();
+    data.setData('text/html', clipboardHtml(html));
+    data.setData('text/plain', text);
+    try { data.setData('text', text); } catch { /* 部分浏览器只接受标准 MIME */ }
+    return data;
+  }
+
+  function landed(before, expected) {
+    const actual = editorText();
+    if (!expected) return actual.length > before.length;
+    const head = expected.slice(0, Math.min(12, expected.length));
+    const tail = expected.slice(-Math.min(18, expected.length));
+    return actual.length > before.length && actual.includes(head) && actual.includes(tail);
+  }
+
+  async function waitLanded(before, expected, timeout) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      if (landed(before, expected)) {
+        await pause(220);
+        if (landed(before, expected)) return true;
+      }
+      await pause(60);
+    }
+    return false;
+  }
+
+  function fiberOf(node) {
+    const key = Object.keys(node).find(name => name.startsWith('__reactFiber$') || name.startsWith('__reactInternalInstance$'));
+    return key ? node[key] : null;
+  }
+
+  function findPasteHandler(element) {
+    let fiber = fiberOf(element);
+    const seen = new Set();
+    while (fiber && !seen.has(fiber)) {
+      seen.add(fiber);
+      if (typeof fiber.memoizedProps?.onPaste === 'function') return fiber.memoizedProps.onPaste;
+      const instance = fiber.stateNode;
+      if (instance && instance !== element && typeof instance._onPaste === 'function') return instance._onPaste.bind(instance);
+      fiber = fiber.return;
+    }
+    const propsKey = Object.keys(element).find(name => name.startsWith('__reactProps$'));
+    if (propsKey && typeof element[propsKey].onPaste === 'function') return element[propsKey].onPaste;
+    return null;
+  }
+
+  function fakePasteEvent(element, data) {
+    return {
+      type: 'paste',
+      bubbles: true,
+      cancelable: true,
+      defaultPrevented: false,
+      isTrusted: true,
+      clipboardData: data,
+      dataTransfer: data,
+      target: element,
+      currentTarget: element,
+      timeStamp: Date.now(),
+      nativeEvent: { isTrusted: true, clipboardData: data, dataTransfer: data, preventDefault() {}, stopPropagation() {} },
+      preventDefault() { this.defaultPrevented = true; },
+      stopPropagation() {},
+      persist() {}
+    };
+  }
+
+  function dispatchPaste(element, data) {
+    const event = new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data });
+    if (!event.clipboardData) {
+      try { Object.defineProperty(event, 'clipboardData', { configurable: true, value: data }); } catch { /* 浏览器不允许覆盖时走 React 处理函数 */ }
+    }
+    element.dispatchEvent(event);
+  }
+
+  async function pasteRich(html, text) {
+    const element = findEditor();
+    if (!element) return { ok: false, reason: '没有找到正文编辑器' };
+    moveCaretToEnd();
+    const before = editorText();
+    const expected = compact(text);
+    const data = richTransfer(html, text);
+    dispatchPaste(element, data);
+    if (await waitLanded(before, expected, 1200)) return { ok: true, via: 'event' };
+    if (editorText().length > before.length) {
+      if (await waitLanded(before, expected, 800)) return { ok: true, via: 'event' };
+      return { ok: false, reason: '正文已变化，但和当前段落不一致' };
+    }
+
+    const handler = findPasteHandler(element);
+    if (!handler) return { ok: false, reason: '编辑器没有暴露粘贴处理函数' };
+    moveCaretToEnd();
+    try {
+      handler(fakePasteEvent(element, data));
+    } catch (error) {
+      return { ok: false, reason: `编辑器拒绝了富文本：${error.message}` };
+    }
+    if (await waitLanded(before, expected, 1200)) return { ok: true, via: 'react' };
+    return { ok: false, reason: '编辑器未写入这段正文' };
+  }
+
+  window.addEventListener('message', event => {
+    if (event.source !== window || event.origin !== location.origin) return;
+    const data = event.data;
+    if (!data || data.source !== 'zhang-xmd' || !data.requestId) return;
+    const reply = payload => window.postMessage({ source: 'zhang-xmd-result', requestId: data.requestId, ...payload }, location.origin);
+    if (data.action === 'caret') {
+      reply({ ok: moveCaretToEnd() });
+      return;
+    }
+    if (data.action === 'paste') {
+      pasteRich(String(data.html || ''), String(data.text || '')).then(reply, error => reply({ ok: false, reason: error.message }));
+    }
+  });
+}

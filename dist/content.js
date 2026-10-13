@@ -5269,12 +5269,17 @@
   function filenameTitle(filename) {
     return filename.replace(/\\/g, "/").split("/").pop().replace(/\.md$/i, "").replace(/^\d{4}-\d{2}-\d{2}[- _]*/, "").trim();
   }
-  function fullImageParagraph(tokens, position) {
+  function imageOnlyParagraph(tokens, position) {
     if (tokens[position]?.type !== "paragraph_open" || tokens[position + 1]?.type !== "inline" || tokens[position + 2]?.type !== "paragraph_close") return null;
-    const children = tokens[position + 1].children?.filter((token) => token.type !== "softbreak") ?? [];
-    if (children.length !== 1 || children[0].type !== "image") return null;
-    const image2 = children[0];
-    return { src: image2.attrGet("src"), alt: image2.content || "", tokenCount: 3 };
+    const images = [];
+    for (const child of tokens[position + 1].children ?? []) {
+      if (child.type === "softbreak" || child.type === "hardbreak") continue;
+      if (child.type === "text" && !child.content.trim()) continue;
+      if (child.type !== "image") return null;
+      images.push({ src: child.attrGet("src"), alt: child.content || "" });
+    }
+    if (!images.length) return null;
+    return { images, tokenCount: 3 };
   }
   function visibleText(tokens) {
     return tokens.filter((token) => token.type === "inline").map((token) => (token.children || []).map((child) => {
@@ -5310,16 +5315,18 @@
         i += 2;
         continue;
       }
-      const image2 = fullImageParagraph(tokens, i);
-      if (image2) {
+      const imageParagraph = imageOnlyParagraph(tokens, i);
+      if (imageParagraph) {
         flush();
-        if (!cover && !firstTextSeen) cover = { src: image2.src, alt: image2.alt };
-        else {
-          const item = { type: "image", src: image2.src, alt: image2.alt, number: images.length + 1 };
-          images.push(item);
-          segments.push(item);
+        for (const image2 of imageParagraph.images) {
+          if (!cover && !firstTextSeen) cover = { src: image2.src, alt: image2.alt };
+          else {
+            const item = { type: "image", src: image2.src, alt: image2.alt, number: images.length + 1 };
+            images.push(item);
+            segments.push(item);
+          }
         }
-        i += image2.tokenCount - 1;
+        i += imageParagraph.tokenCount - 1;
         continue;
       }
       const token = tokens[i];
@@ -5363,7 +5370,7 @@
 
   // src/x-adapter.js
   var pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  var clean = (text2) => String(text2 || "").replace(/\s+/g, "");
+  var clean = (text2) => String(text2 || "").replace(/[\s\u200b\ufeff]+/g, "");
   var visible = (element) => element && element.getClientRects().length > 0;
   async function waitFor(read, message, timeout = 2e4) {
     const deadline = Date.now() + timeout;
@@ -5375,7 +5382,12 @@
     throw new Error(message);
   }
   function textButton(root, names) {
-    return Array.from(root.querySelectorAll('button, [role="button"]')).find((element) => visible(element) && names.includes(element.textContent.trim()) && !element.disabled);
+    const buttons = Array.from(root.querySelectorAll('button, [role="button"]')).filter((element) => visible(element) && !element.disabled);
+    for (const name of names) {
+      const found = buttons.find((element) => element.textContent.trim() === name || element.getAttribute("aria-label") === name);
+      if (found) return found;
+    }
+    return null;
   }
   function setValue(element, value) {
     const prototype = element.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -5384,9 +5396,52 @@
     element.dispatchEvent(new Event("change", { bubbles: true }));
   }
   function editor() {
-    const element = document.querySelector('[data-testid="composer"][contenteditable="true"]');
+    const element = document.querySelector('[data-testid="composer"][contenteditable="true"]') || document.querySelector('[data-testid="articleBody"] [contenteditable="true"]') || document.querySelector('[data-testid="articleBody"][contenteditable="true"]');
     if (!element) throw new Error("\u6CA1\u6709\u627E\u5230 X Articles \u6B63\u6587\u7F16\u8F91\u5668");
     return element;
+  }
+  function editorImages() {
+    return editor().querySelectorAll('section img, figure img, [data-block="true"] img');
+  }
+  function pageCommand(payload, timeout = 5e3) {
+    const requestId = crypto.randomUUID();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        window.removeEventListener("message", onMessage);
+        resolve({ ok: false, reason: "\u9875\u9762\u7C98\u8D34\u901A\u9053\u6CA1\u6709\u54CD\u5E94\uFF0C\u8BF7\u91CD\u65B0\u52A0\u8F7D\u6269\u5C55\u540E\u518D\u8BD5" });
+      }, timeout);
+      function onMessage(event) {
+        if (event.source !== window || event.origin !== location.origin) return;
+        const data = event.data;
+        if (!data || data.source !== "zhang-xmd-result" || data.requestId !== requestId) return;
+        clearTimeout(timer);
+        window.removeEventListener("message", onMessage);
+        resolve(data);
+      }
+      window.addEventListener("message", onMessage);
+      window.postMessage({ source: "zhang-xmd", requestId, ...payload }, location.origin);
+    });
+  }
+  function expectedText(html) {
+    return clean(new DOMParser().parseFromString(html, "text/html").body.textContent);
+  }
+  function textLanded(before, expected) {
+    const actual = clean(editor().innerText);
+    if (!expected) return actual.length > before.length;
+    const head = expected.slice(0, Math.min(12, expected.length));
+    const tail = expected.slice(-Math.min(18, expected.length));
+    return actual.length > before.length && actual.includes(head) && actual.includes(tail);
+  }
+  async function waitLanded(before, expected, timeout) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      if (textLanded(before, expected)) {
+        await pause(220);
+        if (textLanded(before, expected)) return true;
+      }
+      await pause(80);
+    }
+    return false;
   }
   async function caretAtEnd() {
     const element = editor();
@@ -5403,14 +5458,30 @@
     selection.addRange(range);
     document.dispatchEvent(new Event("selectionchange", { bubbles: true }));
     element.dispatchEvent(new Event("select", { bubbles: true }));
-    await pause(100);
+    await pageCommand({ action: "caret" }, 1200);
+    await pause(80);
+  }
+  function findMenuItem(names) {
+    const items = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"]'));
+    const exact = items.find((element) => names.includes(element.textContent.trim()) || names.includes(element.getAttribute("aria-label") || ""));
+    if (exact) return exact;
+    return items.find((element) => {
+      const label = `${element.getAttribute("aria-label") || ""} ${element.textContent || ""}`.replace(/\s+/g, " ").trim().toLowerCase();
+      return names.some((name) => {
+        const wanted = name.toLowerCase();
+        return label === wanted || label.startsWith(`${wanted} `) || label.startsWith(`${wanted}\uFF0C`);
+      });
+    });
   }
   async function openInsert(names) {
     await caretAtEnd();
-    const button = document.querySelector('button[aria-label="Add Media"], button[aria-label="\u6DFB\u52A0\u5A92\u4F53"]');
+    const button = document.querySelector('button[aria-label="Add Media"], button[aria-label="\u6DFB\u52A0\u5A92\u4F53"]') || Array.from(document.querySelectorAll('button, [role="button"]')).find((element) => {
+      const label = (element.getAttribute("aria-label") || "").trim().toLowerCase();
+      return visible(element) && !element.disabled && (label.includes("add media") || label.includes("\u6DFB\u52A0\u5A92\u4F53"));
+    });
     if (!button) throw new Error("\u6CA1\u6709\u627E\u5230 X \u7684 Insert \u83DC\u5355");
     button.click();
-    const item = await waitFor(() => Array.from(document.querySelectorAll('[role="menuitem"]')).find((element) => names.includes(element.textContent.trim())), `\u6CA1\u6709\u627E\u5230 ${names[0]} \u63D2\u5165\u9009\u9879`);
+    const item = await waitFor(() => findMenuItem(names), `\u6CA1\u6709\u627E\u5230 ${names[0]} \u63D2\u5165\u9009\u9879`);
     item.click();
   }
   async function modal() {
@@ -5419,7 +5490,10 @@
   function assignFile(input, file) {
     const transfer = new DataTransfer();
     transfer.items.add(file);
-    input.files = transfer.files;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "files")?.set;
+    if (setter) setter.call(input, transfer.files);
+    else input.files = transfer.files;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
   }
   async function settleMedia() {
@@ -5428,20 +5502,35 @@
       return !/Uploading|Processing|正在上传|正在处理|上传媒体|处理媒体/i.test(heading2);
     }, "X \u7684\u5A92\u4F53\u5904\u7406\u8D85\u8FC7 60 \u79D2\uFF0C\u8BF7\u67E5\u770B\u8349\u7A3F\u4E2D\u7684\u4E0A\u4F20\u72B6\u6001", 6e4);
   }
-  async function insertHtml(step) {
+  async function systemPaste(html, text2) {
+    if (!navigator.clipboard?.write || !window.ClipboardItem) throw new Error("\u6D4F\u89C8\u5668\u526A\u8D34\u677F\u4E0D\u53EF\u7528");
+    const htmlDoc = `<!DOCTYPE html><html><body><!--StartFragment-->${html}<!--EndFragment--></body></html>`;
+    await navigator.clipboard.write([new ClipboardItem({
+      "text/html": new Blob([htmlDoc], { type: "text/html" }),
+      "text/plain": new Blob([text2], { type: "text/plain" })
+    })]);
     await caretAtEnd();
-    const element = editor();
-    const before = clean(element.textContent);
-    const data = new DataTransfer();
-    data.setData("text/html", step.html);
-    data.setData("text/plain", step.text);
-    element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data }));
-    const parsed = new DOMParser().parseFromString(step.html, "text/html");
-    const expected = clean(parsed.body.textContent);
-    await waitFor(() => {
-      const actual = clean(editor().textContent);
-      return actual.length > before.length && actual.includes(expected.slice(-Math.min(48, expected.length)));
-    }, "X \u6CA1\u6709\u63A5\u53D7\u5BCC\u6587\u672C\u7C98\u8D34\uFF0C\u5DF2\u4FDD\u7559\u5F53\u524D\u8349\u7A3F\uFF1B\u53EF\u7528\u9762\u677F\u4E2D\u7684\u5206\u6BB5\u590D\u5236\u7EE7\u7EED", 5e3);
+    editor().focus();
+    if (!document.execCommand("paste")) throw new Error("Chrome \u6CA1\u6709\u6267\u884C\u6269\u5C55\u7C98\u8D34\uFF0C\u8BF7\u5141\u8BB8\u6269\u5C55\u8BFB\u53D6\u526A\u8D34\u677F\u540E\u91CD\u8BD5");
+  }
+  async function insertHtml(step) {
+    const before = clean(editor().innerText);
+    const expected = clean(step.text) || expectedText(step.html);
+    const viaPage = await pageCommand({ action: "paste", html: step.html, text: step.text });
+    if (await waitLanded(before, expected, viaPage?.ok ? 1600 : 400)) return;
+    if (clean(editor().innerText).length > before.length) {
+      if (await waitLanded(before, expected, 1200)) return;
+      throw new Error("\u6B63\u6587\u5DF2\u53D8\u5316\uFF0C\u4F46\u548C\u5F53\u524D\u6BB5\u843D\u4E0D\u4E00\u81F4\uFF0C\u5DF2\u505C\u6B62\u4EE5\u514D\u91CD\u590D\u7C98\u8D34");
+    }
+    let clipboardError = "";
+    try {
+      await systemPaste(step.html, step.text);
+    } catch (error2) {
+      clipboardError = error2.message;
+    }
+    if (await waitLanded(before, expected, 4e3)) return;
+    const detail = [viaPage?.reason, clipboardError].filter(Boolean).join("\uFF1B");
+    throw new Error(`X \u6CA1\u6709\u63A5\u53D7\u5BCC\u6587\u672C\u7C98\u8D34${detail ? `\uFF08${detail}\uFF09` : ""}\uFF0C\u5DF2\u4FDD\u7559\u5F53\u524D\u8349\u7A3F\uFF1B\u53EF\u7528\u9762\u677F\u4E2D\u7684\u5206\u6BB5\u590D\u5236\u7EE7\u7EED`);
   }
   async function insertCode(step) {
     const before = editor().querySelectorAll('[data-testid="markdown-code-block"]').length;
@@ -5488,12 +5577,12 @@
     }, "\u8868\u683C\u5185\u5BB9\u672A\u4FDD\u5B58");
   }
   async function insertImage(file) {
-    const before = editor().querySelectorAll("section img").length;
+    const before = editorImages().length;
     await openInsert(["Media", "\u5A92\u4F53"]);
     const dialog = await modal();
     const input = await waitFor(() => dialog.querySelector('input[type="file"]'), "\u6CA1\u6709\u627E\u5230\u6B63\u6587\u56FE\u7247\u4E0A\u4F20\u5165\u53E3");
     assignFile(input, file);
-    await waitFor(() => editor().querySelectorAll("section img").length > before, "\u6B63\u6587\u56FE\u7247\u6CA1\u6709\u5B8C\u6210\u4E0A\u4F20", 6e4);
+    await waitFor(() => editorImages().length > before, "\u6B63\u6587\u56FE\u7247\u6CA1\u6709\u5B8C\u6210\u4E0A\u4F20", 6e4);
     await settleMedia();
   }
   async function insertCover(file) {
@@ -5501,7 +5590,7 @@
     if (!input) throw new Error("\u6CA1\u6709\u627E\u5230\u6587\u7AE0\u5C01\u9762\u4E0A\u4F20\u5165\u53E3");
     assignFile(input, file);
     const dialog = await modal();
-    const apply = await waitFor(() => textButton(dialog, ["Apply", "\u5E94\u7528"]), "\u5C01\u9762\u88C1\u526A\u6309\u94AE\u672A\u5C31\u7EEA", 3e4);
+    const apply = await waitFor(() => textButton(dialog, ["Apply", "\u5E94\u7528", "Done", "\u5B8C\u6210", "Save", "\u4FDD\u5B58"]), "\u5C01\u9762\u88C1\u526A\u6309\u94AE\u672A\u5C31\u7EEA", 3e4);
     apply.click();
     await waitFor(() => !document.contains(dialog), "\u5C01\u9762\u88C1\u526A\u5F39\u7A97\u6CA1\u6709\u5173\u95ED");
     await settleMedia();
@@ -5524,6 +5613,35 @@
     const bytes = Uint8Array.from(atob(response.base64), (char) => char.charCodeAt(0));
     return new File([bytes], response.filename, { type: response.type });
   }
+  function titleField() {
+    return document.querySelector('textarea[name="Article Title"]');
+  }
+  function bodyIsEmpty() {
+    try {
+      return !clean(editor().innerText);
+    } catch {
+      return false;
+    }
+  }
+  async function ensureDraft() {
+    const onEdit = /\/compose\/articles\/edit\/\d+/.test(location.pathname);
+    if (onEdit && titleField() && bodyIsEmpty()) return;
+    const create = document.querySelector('button[aria-label="create"], button[aria-label="Create"], button[aria-label="\u521B\u5EFA"]');
+    if (!create) throw new Error("\u8BF7\u5148\u56DE\u5230 X Articles \u5217\u8868\uFF0C\u6216\u6253\u5F00\u4E00\u7BC7\u7A7A\u767D\u8349\u7A3F\uFF0C\u518D\u5BFC\u5165");
+    const oldPath = location.pathname;
+    create.click();
+    await waitFor(() => {
+      const field = titleField();
+      if (!field || location.pathname === oldPath || !/\/compose\/articles\/edit\/\d+/.test(location.pathname)) return null;
+      if (field.value !== "") return null;
+      try {
+        if (clean(editor().innerText)) return null;
+      } catch {
+        return null;
+      }
+      return true;
+    }, "\u7A7A\u767D\u65B0\u8349\u7A3F\u672A\u51FA\u73B0\uFF0C\u5DF2\u505C\u6B62\u5BFC\u5165\u4EE5\u514D\u8986\u76D6\u73B0\u6709\u5185\u5BB9");
+  }
   async function importArticle(bundle, { onProgress = () => {
   }, localFiles = [], signal } = {}) {
     const ensureActive = () => {
@@ -5539,16 +5657,10 @@
     }
     ensureActive();
     onProgress("\u6B63\u5728\u65B0\u5EFA X Article \u8349\u7A3F\u2026");
-    const oldPath = location.pathname;
-    const create = document.querySelector('button[aria-label="create"]');
-    if (!create) throw new Error("\u8BF7\u5148\u56DE\u5230 X Articles \u5217\u8868\u6216\u666E\u901A\u7F16\u8F91\u6A21\u5F0F\uFF0C\u518D\u5BFC\u5165");
-    create.click();
-    await waitFor(() => {
-      const titleField = document.querySelector('textarea[name="Article Title"]');
-      const bodyField = document.querySelector('[data-testid="composer"]');
-      return location.pathname !== oldPath && /\/compose\/articles\/edit\/\d+/.test(location.pathname) && titleField && titleField.value === "" && bodyField && !clean(bodyField.textContent);
-    }, "\u7A7A\u767D\u65B0\u8349\u7A3F\u672A\u51FA\u73B0\uFF0C\u5DF2\u505C\u6B62\u5BFC\u5165\u4EE5\u514D\u8986\u76D6\u73B0\u6709\u5185\u5BB9");
-    setValue(document.querySelector('textarea[name="Article Title"]'), bundle.title);
+    await ensureDraft();
+    const field = titleField();
+    if (!field) throw new Error("\u6CA1\u6709\u627E\u5230 X Articles \u6807\u9898\u6846");
+    setValue(field, bundle.title);
     if (bundle.cover) {
       ensureActive();
       onProgress("\u6B63\u5728\u4E0A\u4F20\u5C01\u9762\u2026");
@@ -5568,7 +5680,7 @@
     await waitFor(() => !/Saving|正在保存|保存中/i.test(document.querySelector("#detail-header")?.textContent || ""), "X \u5C1A\u672A\u786E\u8BA4\u4FDD\u5B58\uFF0C\u8BF7\u7A0D\u540E\u67E5\u770B\u8349\u7A3F", 3e4);
     const codeCount = editor().querySelectorAll('[data-testid="markdown-code-block"]').length;
     const tableCount = editor().querySelectorAll("section table").length;
-    const imageCount = editor().querySelectorAll("section img").length;
+    const imageCount = editorImages().length;
     if (codeCount !== bundle.statistics.code || tableCount !== bundle.statistics.tables || imageCount < bundle.statistics.images) throw new Error("\u5BFC\u5165\u540E\u6570\u91CF\u6838\u5BF9\u4E0D\u4E00\u81F4\uFF0C\u8BF7\u68C0\u67E5\u8349\u7A3F\u4E2D\u7684\u56FE\u7247\u3001\u4EE3\u7801\u6216\u8868\u683C");
     return { url: location.href, codeCount, tableCount, imageCount };
   }
