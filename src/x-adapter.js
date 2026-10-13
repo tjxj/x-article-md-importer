@@ -85,6 +85,7 @@ async function waitLanded(before, expected, timeout) {
 }
 
 async function caretAtEnd() {
+  try { window.focus(); } catch { /* 忽略焦点异常 */ }
   const element = editor();
   element.focus();
   const blocks = Array.from(element.querySelectorAll('[data-block="true"]')).filter(block => block.getAttribute('contenteditable') !== 'false');
@@ -150,19 +151,178 @@ async function settleMedia() {
   }, 'X 的媒体处理超过 60 秒，请查看草稿中的上传状态', 60000);
 }
 
-async function systemPaste(html, text) {
-  if (!navigator.clipboard?.write || !window.ClipboardItem) throw new Error('浏览器剪贴板不可用');
+export function copyRichViaExecCommand(html, text) {
   const htmlDoc = `<!DOCTYPE html><html><body><!--StartFragment-->${html}<!--EndFragment--></body></html>`;
-  await navigator.clipboard.write([new ClipboardItem({
-    'text/html': new Blob([htmlDoc], { type: 'text/html' }),
-    'text/plain': new Blob([text], { type: 'text/plain' })
-  })]);
+  let written = false;
+  const onCopy = event => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (event.clipboardData) {
+      event.clipboardData.setData('text/html', htmlDoc);
+      event.clipboardData.setData('text/plain', text);
+      try { event.clipboardData.setData('text', text); } catch {}
+      written = true;
+    }
+  };
+
+  const container = document.createElement('div');
+  container.contentEditable = 'true';
+  container.tabIndex = -1;
+  container.setAttribute('aria-hidden', 'true');
+  container.style.position = 'fixed';
+  container.style.left = '-9999px';
+  container.style.top = '-9999px';
+  container.style.width = '1px';
+  container.style.height = '1px';
+  container.style.opacity = '0';
+  container.style.pointerEvents = 'none';
+  container.innerHTML = htmlDoc;
+  (document.body || document.documentElement).appendChild(container);
+
+  const selection = window.getSelection();
+  const previousRanges = [];
+  if (selection) {
+    for (let i = 0; i < selection.rangeCount; i++) {
+      previousRanges.push(selection.getRangeAt(i));
+    }
+    selection.removeAllRanges();
+    const range = document.createRange();
+    range.selectNodeContents(container);
+    selection.addRange(range);
+  }
+  container.focus();
+
+  document.addEventListener('copy', onCopy, { capture: true, once: true });
+  try {
+    const res = document.execCommand('copy');
+    written = written || res;
+  } catch {
+    // 忽略 execCommand 异常
+  } finally {
+    document.removeEventListener('copy', onCopy, { capture: true });
+    container.remove();
+    if (selection) {
+      selection.removeAllRanges();
+      for (const r of previousRanges) {
+        selection.addRange(r);
+      }
+    }
+  }
+  return written;
+}
+
+export function copyPlainTextViaExecCommand(text) {
+  let written = false;
+  const onCopy = event => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (event.clipboardData) {
+      event.clipboardData.setData('text/plain', text);
+      try { event.clipboardData.setData('text', text); } catch {}
+      written = true;
+    }
+  };
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.tabIndex = -1;
+  textarea.setAttribute('aria-hidden', 'true');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  textarea.style.top = '-9999px';
+  textarea.style.width = '1px';
+  textarea.style.height = '1px';
+  textarea.style.opacity = '0';
+  textarea.style.pointerEvents = 'none';
+  (document.body || document.documentElement).appendChild(textarea);
+
+  textarea.focus();
+  textarea.select();
+
+  document.addEventListener('copy', onCopy, { capture: true, once: true });
+  try {
+    const res = document.execCommand('copy');
+    written = written || res;
+  } catch {
+    // 忽略异常
+  } finally {
+    document.removeEventListener('copy', onCopy, { capture: true });
+    textarea.remove();
+  }
+  return written;
+}
+
+export async function writeRichClipboard(html, text) {
+  const htmlDoc = `<!DOCTYPE html><html><body><!--StartFragment-->${html}<!--EndFragment--></body></html>`;
+
+  // 1. 若当前窗口/文档具有焦点，优先尝试异步 Clipboard API
+  if (typeof document !== 'undefined' && document.hasFocus() && navigator.clipboard?.write && window.ClipboardItem) {
+    try {
+      await navigator.clipboard.write([new ClipboardItem({
+        'text/html': new Blob([htmlDoc], { type: 'text/html' }),
+        'text/plain': new Blob([text], { type: 'text/plain' })
+      })]);
+      return true;
+    } catch {
+      // 捕获 Document is not focused 等异常，无缝降级到 execCommand
+    }
+  }
+
+  // 2. 降级使用 execCommand('copy')，不受 document.hasFocus() 限制
+  if (typeof document !== 'undefined' && copyRichViaExecCommand(html, text)) {
+    return true;
+  }
+
+  // 3. 兜底再次尝试 Clipboard API
+  if (navigator.clipboard?.write && window.ClipboardItem) {
+    try { window.focus(); } catch {}
+    await navigator.clipboard.write([new ClipboardItem({
+      'text/html': new Blob([htmlDoc], { type: 'text/html' }),
+      'text/plain': new Blob([text], { type: 'text/plain' })
+    })]);
+    return true;
+  }
+
+  throw new Error('写入剪贴板失败，请允许扩展访问剪贴板');
+}
+
+export async function writePlainTextClipboard(text) {
+  if (typeof document !== 'undefined' && document.hasFocus() && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // 降级
+    }
+  }
+
+  if (typeof document !== 'undefined' && copyPlainTextViaExecCommand(text)) {
+    return true;
+  }
+
+  if (navigator.clipboard?.writeText) {
+    try { window.focus(); } catch {}
+    await navigator.clipboard.writeText(text);
+    return true;
+  }
+
+  throw new Error('写入剪贴板失败，请允许扩展访问剪贴板');
+}
+
+async function systemPaste(html, text) {
+  try { window.focus(); } catch {}
+  await caretAtEnd();
+  editor().focus();
+  await writeRichClipboard(html, text);
   await caretAtEnd();
   editor().focus();
   if (!document.execCommand('paste')) throw new Error('Chrome 没有执行扩展粘贴，请允许扩展读取剪贴板后重试');
 }
 
 async function insertHtml(step) {
+  try { window.focus(); } catch {}
+  await caretAtEnd();
+  editor().focus();
   const before = clean(editor().innerText);
   const expected = clean(step.text) || expectedText(step.html);
   const viaPage = await pageCommand({ action: 'paste', html: step.html, text: step.text });

@@ -5444,6 +5444,10 @@
     return false;
   }
   async function caretAtEnd() {
+    try {
+      window.focus();
+    } catch {
+    }
     const element = editor();
     element.focus();
     const blocks = Array.from(element.querySelectorAll('[data-block="true"]')).filter((block2) => block2.getAttribute("contenteditable") !== "false");
@@ -5502,18 +5506,171 @@
       return !/Uploading|Processing|正在上传|正在处理|上传媒体|处理媒体/i.test(heading2);
     }, "X \u7684\u5A92\u4F53\u5904\u7406\u8D85\u8FC7 60 \u79D2\uFF0C\u8BF7\u67E5\u770B\u8349\u7A3F\u4E2D\u7684\u4E0A\u4F20\u72B6\u6001", 6e4);
   }
-  async function systemPaste(html, text2) {
-    if (!navigator.clipboard?.write || !window.ClipboardItem) throw new Error("\u6D4F\u89C8\u5668\u526A\u8D34\u677F\u4E0D\u53EF\u7528");
+  function copyRichViaExecCommand(html, text2) {
     const htmlDoc = `<!DOCTYPE html><html><body><!--StartFragment-->${html}<!--EndFragment--></body></html>`;
-    await navigator.clipboard.write([new ClipboardItem({
-      "text/html": new Blob([htmlDoc], { type: "text/html" }),
-      "text/plain": new Blob([text2], { type: "text/plain" })
-    })]);
+    let written = false;
+    const onCopy = (event) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.clipboardData) {
+        event.clipboardData.setData("text/html", htmlDoc);
+        event.clipboardData.setData("text/plain", text2);
+        try {
+          event.clipboardData.setData("text", text2);
+        } catch {
+        }
+        written = true;
+      }
+    };
+    const container = document.createElement("div");
+    container.contentEditable = "true";
+    container.tabIndex = -1;
+    container.setAttribute("aria-hidden", "true");
+    container.style.position = "fixed";
+    container.style.left = "-9999px";
+    container.style.top = "-9999px";
+    container.style.width = "1px";
+    container.style.height = "1px";
+    container.style.opacity = "0";
+    container.style.pointerEvents = "none";
+    container.innerHTML = htmlDoc;
+    (document.body || document.documentElement).appendChild(container);
+    const selection = window.getSelection();
+    const previousRanges = [];
+    if (selection) {
+      for (let i = 0; i < selection.rangeCount; i++) {
+        previousRanges.push(selection.getRangeAt(i));
+      }
+      selection.removeAllRanges();
+      const range = document.createRange();
+      range.selectNodeContents(container);
+      selection.addRange(range);
+    }
+    container.focus();
+    document.addEventListener("copy", onCopy, { capture: true, once: true });
+    try {
+      const res = document.execCommand("copy");
+      written = written || res;
+    } catch {
+    } finally {
+      document.removeEventListener("copy", onCopy, { capture: true });
+      container.remove();
+      if (selection) {
+        selection.removeAllRanges();
+        for (const r of previousRanges) {
+          selection.addRange(r);
+        }
+      }
+    }
+    return written;
+  }
+  function copyPlainTextViaExecCommand(text2) {
+    let written = false;
+    const onCopy = (event) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.clipboardData) {
+        event.clipboardData.setData("text/plain", text2);
+        try {
+          event.clipboardData.setData("text", text2);
+        } catch {
+        }
+        written = true;
+      }
+    };
+    const textarea = document.createElement("textarea");
+    textarea.value = text2;
+    textarea.tabIndex = -1;
+    textarea.setAttribute("aria-hidden", "true");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "-9999px";
+    textarea.style.width = "1px";
+    textarea.style.height = "1px";
+    textarea.style.opacity = "0";
+    textarea.style.pointerEvents = "none";
+    (document.body || document.documentElement).appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    document.addEventListener("copy", onCopy, { capture: true, once: true });
+    try {
+      const res = document.execCommand("copy");
+      written = written || res;
+    } catch {
+    } finally {
+      document.removeEventListener("copy", onCopy, { capture: true });
+      textarea.remove();
+    }
+    return written;
+  }
+  async function writeRichClipboard(html, text2) {
+    const htmlDoc = `<!DOCTYPE html><html><body><!--StartFragment-->${html}<!--EndFragment--></body></html>`;
+    if (typeof document !== "undefined" && document.hasFocus() && navigator.clipboard?.write && window.ClipboardItem) {
+      try {
+        await navigator.clipboard.write([new ClipboardItem({
+          "text/html": new Blob([htmlDoc], { type: "text/html" }),
+          "text/plain": new Blob([text2], { type: "text/plain" })
+        })]);
+        return true;
+      } catch {
+      }
+    }
+    if (typeof document !== "undefined" && copyRichViaExecCommand(html, text2)) {
+      return true;
+    }
+    if (navigator.clipboard?.write && window.ClipboardItem) {
+      try {
+        window.focus();
+      } catch {
+      }
+      await navigator.clipboard.write([new ClipboardItem({
+        "text/html": new Blob([htmlDoc], { type: "text/html" }),
+        "text/plain": new Blob([text2], { type: "text/plain" })
+      })]);
+      return true;
+    }
+    throw new Error("\u5199\u5165\u526A\u8D34\u677F\u5931\u8D25\uFF0C\u8BF7\u5141\u8BB8\u6269\u5C55\u8BBF\u95EE\u526A\u8D34\u677F");
+  }
+  async function writePlainTextClipboard(text2) {
+    if (typeof document !== "undefined" && document.hasFocus() && navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text2);
+        return true;
+      } catch {
+      }
+    }
+    if (typeof document !== "undefined" && copyPlainTextViaExecCommand(text2)) {
+      return true;
+    }
+    if (navigator.clipboard?.writeText) {
+      try {
+        window.focus();
+      } catch {
+      }
+      await navigator.clipboard.writeText(text2);
+      return true;
+    }
+    throw new Error("\u5199\u5165\u526A\u8D34\u677F\u5931\u8D25\uFF0C\u8BF7\u5141\u8BB8\u6269\u5C55\u8BBF\u95EE\u526A\u8D34\u677F");
+  }
+  async function systemPaste(html, text2) {
+    try {
+      window.focus();
+    } catch {
+    }
+    await caretAtEnd();
+    editor().focus();
+    await writeRichClipboard(html, text2);
     await caretAtEnd();
     editor().focus();
     if (!document.execCommand("paste")) throw new Error("Chrome \u6CA1\u6709\u6267\u884C\u6269\u5C55\u7C98\u8D34\uFF0C\u8BF7\u5141\u8BB8\u6269\u5C55\u8BFB\u53D6\u526A\u8D34\u677F\u540E\u91CD\u8BD5");
   }
   async function insertHtml(step) {
+    try {
+      window.focus();
+    } catch {
+    }
+    await caretAtEnd();
+    editor().focus();
     const before = clean(editor().innerText);
     const expected = clean(step.text) || expectedText(step.html);
     const viaPage = await pageCommand({ action: "paste", html: step.html, text: step.text });
@@ -5768,12 +5925,7 @@
     updateVisibility();
     new MutationObserver(updateVisibility).observe(document.body, { childList: true, subtree: true });
     async function copyContent(html, plain) {
-      if (!navigator.clipboard?.write || !window.ClipboardItem) throw new Error("\u6D4F\u89C8\u5668\u4E0D\u652F\u6301\u5BCC\u6587\u672C\u526A\u8D34\u677F\uFF0C\u8BF7\u4F7F\u7528\u6700\u65B0\u7248 Chrome");
-      const item = new ClipboardItem({
-        "text/html": new Blob([html], { type: "text/html" }),
-        "text/plain": new Blob([plain], { type: "text/plain" })
-      });
-      await navigator.clipboard.write([item]);
+      await writeRichClipboard(html, plain);
     }
     async function onPanelClick(event) {
       const button = event.target.closest("button[data-action]");
@@ -5815,7 +5967,7 @@
           if (!link2) throw new Error("\u8BF7\u5148\u6253\u5F00\u4E00\u4E2A X Article \u8349\u7A3F");
           link2.click();
         } else if (action === "title") {
-          await navigator.clipboard.writeText(bundle.title);
+          await writePlainTextClipboard(bundle.title);
           setStatus("\u6807\u9898\u5DF2\u590D\u5236\uFF0C\u7C98\u8D34\u5230 X \u7684\u6807\u9898\u6846");
         } else if (action === "all") {
           const html = inlineRichHtml(bundle);
@@ -5831,7 +5983,7 @@
             await copyContent(step.html, step.text);
             setStatus(`\u7B2C ${index + 1} \u6BB5\u5BCC\u6587\u672C\u5DF2\u590D\u5236\uFF0C\u56DE\u5230\u6B63\u6587\u6309 \u2318V`);
           } else {
-            await navigator.clipboard.writeText(step.type === "code" ? step.code : step.markdown);
+            await writePlainTextClipboard(step.type === "code" ? step.code : step.markdown);
             setStatus(`\u7B2C ${index + 1} \u6B65\u5DF2\u590D\u5236\uFF0C\u8BF7\u4F7F\u7528 X \u7684\u539F\u751F${step.type === "code" ? "\u4EE3\u7801\u5757" : "\u8868\u683C"}\u5165\u53E3`);
           }
           activeStep = Math.min(index + 1, bundle.segments.length - 1);

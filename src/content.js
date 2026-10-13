@@ -1,5 +1,5 @@
 import { convertMarkdown, inlineRichHtml } from './core.js';
-import { importArticle } from './x-adapter.js';
+import { importArticle, writeRichClipboard, writePlainTextClipboard } from './x-adapter.js';
 
 if (!document.getElementById('zhang-xmd-launcher')) {
   const launcher = document.createElement('button');
@@ -45,12 +45,7 @@ if (!document.getElementById('zhang-xmd-launcher')) {
   }
 
   async function copyContent(html, plain) {
-    if (!navigator.clipboard?.write || !window.ClipboardItem) throw new Error('浏览器不支持富文本剪贴板，请使用最新版 Chrome');
-    const item = new ClipboardItem({
-      'text/html': new Blob([html], { type: 'text/html' }),
-      'text/plain': new Blob([plain], { type: 'text/plain' })
-    });
-    await navigator.clipboard.write([item]);
+    await writeRichClipboard(html, plain);
   }
 
   function escapeHtml(value) {
@@ -134,7 +129,7 @@ if (!document.getElementById('zhang-xmd-launcher')) {
         if (!link) throw new Error('请先打开一个 X Article 草稿');
         link.click();
       } else if (action === 'title') {
-        await navigator.clipboard.writeText(bundle.title);
+        await writePlainTextClipboard(bundle.title);
         setStatus('标题已复制，粘贴到 X 的标题框');
       } else if (action === 'all') {
         const html = inlineRichHtml(bundle);
@@ -150,7 +145,7 @@ if (!document.getElementById('zhang-xmd-launcher')) {
           await copyContent(step.html, step.text);
           setStatus(`第 ${index + 1} 段富文本已复制，回到正文按 ⌘V`);
         } else {
-          await navigator.clipboard.writeText(step.type === 'code' ? step.code : step.markdown);
+          await writePlainTextClipboard(step.type === 'code' ? step.code : step.markdown);
           setStatus(`第 ${index + 1} 步已复制，请使用 X 的原生${step.type === 'code' ? '代码块' : '表格'}入口`);
         }
         activeStep = Math.min(index + 1, bundle.segments.length - 1);

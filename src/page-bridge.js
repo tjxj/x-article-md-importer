@@ -36,9 +36,15 @@ if (!window.__zhangXmdBridge) {
 
   function richTransfer(html, text) {
     const data = new DataTransfer();
-    data.setData('text/html', clipboardHtml(html));
+    const fullHtml = clipboardHtml(html);
+    data.setData('text/html', fullHtml);
     data.setData('text/plain', text);
     try { data.setData('text', text); } catch { /* 部分浏览器只接受标准 MIME */ }
+    try { data.setData('Text', text); } catch { /* 兼容部分旧库 */ }
+    try {
+      Object.defineProperty(data, 'text/html', { value: fullHtml, configurable: true });
+      Object.defineProperty(data, 'text/plain', { value: text, configurable: true });
+    } catch { /* 忽略环境只读限制 */ }
     return data;
   }
 
@@ -70,15 +76,29 @@ if (!window.__zhangXmdBridge) {
   function findPasteHandler(element) {
     let fiber = fiberOf(element);
     const seen = new Set();
+    // 优先查找 DraftEditor 等组件实例本身的 _onPaste 方法
     while (fiber && !seen.has(fiber)) {
       seen.add(fiber);
-      if (typeof fiber.memoizedProps?.onPaste === 'function') return fiber.memoizedProps.onPaste;
       const instance = fiber.stateNode;
-      if (instance && instance !== element && typeof instance._onPaste === 'function') return instance._onPaste.bind(instance);
+      if (instance && instance !== element && typeof instance._onPaste === 'function') {
+        return { fn: instance._onPaste.bind(instance), instance };
+      }
+      fiber = fiber.return;
+    }
+    // 其次查找 props.onPaste
+    fiber = fiberOf(element);
+    seen.clear();
+    while (fiber && !seen.has(fiber)) {
+      seen.add(fiber);
+      if (typeof fiber.memoizedProps?.onPaste === 'function') {
+        return { fn: fiber.memoizedProps.onPaste, instance: null };
+      }
       fiber = fiber.return;
     }
     const propsKey = Object.keys(element).find(name => name.startsWith('__reactProps$'));
-    if (propsKey && typeof element[propsKey].onPaste === 'function') return element[propsKey].onPaste;
+    if (propsKey && typeof element[propsKey].onPaste === 'function') {
+      return { fn: element[propsKey].onPaste, instance: null };
+    }
     return null;
   }
 
@@ -112,6 +132,8 @@ if (!window.__zhangXmdBridge) {
   async function pasteRich(html, text) {
     const element = findEditor();
     if (!element) return { ok: false, reason: '没有找到正文编辑器' };
+    try { window.focus(); } catch { /* 忽略焦点异常 */ }
+    element.focus();
     moveCaretToEnd();
     const before = editorText();
     const expected = compact(text);
@@ -125,9 +147,13 @@ if (!window.__zhangXmdBridge) {
 
     const handler = findPasteHandler(element);
     if (!handler) return { ok: false, reason: '编辑器没有暴露粘贴处理函数' };
+    element.focus();
     moveCaretToEnd();
+    if (handler.instance && typeof handler.instance.focus === 'function') {
+      try { handler.instance.focus(); } catch { /* 忽略内部 focus 报错 */ }
+    }
     try {
-      handler(fakePasteEvent(element, data));
+      handler.fn(fakePasteEvent(element, data));
     } catch (error) {
       return { ok: false, reason: `编辑器拒绝了富文本：${error.message}` };
     }
