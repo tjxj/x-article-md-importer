@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "老章 Markdown → X Articles",
-  "version": "0.1.1",
-  "version_name": "0.1.1",
+  "version": "0.1.4",
+  "version_name": "0.1.4",
   "description": "将本地 Markdown 自动导入 X Articles，包含标题、封面、正文图片、原生代码和表格。",
   "permissions": ["clipboardWrite", "clipboardRead"],
   "host_permissions": ["https://r2blog.zhanglearning.com/*", "https://r2.zhanglearning.com/*"],

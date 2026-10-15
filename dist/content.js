@@ -5288,6 +5288,18 @@
       return "";
     }).join("")).join("\n");
   }
+  function tableRows(tokens) {
+    const rows = [];
+    let row = null;
+    for (const token of tokens) {
+      if (token.type === "tr_open") row = [];
+      else if (token.type === "tr_close" && row) {
+        rows.push(row);
+        row = null;
+      } else if (token.type === "inline" && row) row.push(visibleText([token]));
+    }
+    return rows;
+  }
   function convertMarkdown(source, filename = "article.md") {
     const { metadata, body } = metadataAndBody(source);
     const lines = body.split("\n");
@@ -5307,8 +5319,51 @@
     function flush() {
       if (!pending.length) return;
       const html = markdown.renderer.render(pending, markdown.options, {});
+      if (/<img\b/i.test(html)) throw new Error("\u5217\u8868\u6216\u5F15\u7528\u4E2D\u7684\u56FE\u7247\u6682\u4E0D\u80FD\u81EA\u52A8\u5BFC\u5165\uFF0C\u8BF7\u628A\u56FE\u7247\u5355\u72EC\u653E\u6210\u6B63\u6587\u6BB5\u843D");
       if (html.trim()) segments.push({ type: "html", html, text: visibleText(pending) });
       pending = [];
+    }
+    function addImage(image2, mayBeCover) {
+      if (mayBeCover && !cover && !firstTextSeen) cover = image2;
+      else {
+        const item = { type: "image", ...image2, number: images.length + 1 };
+        images.push(item);
+        segments.push(item);
+      }
+    }
+    function splitMixedImageParagraph(position) {
+      const opening = tokens[position];
+      const inline2 = tokens[position + 1];
+      if (opening?.type !== "paragraph_open" || inline2?.type !== "inline" || tokens[position + 2]?.type !== "paragraph_close") return false;
+      if (!inline2.children?.some((child) => child.type === "image")) return false;
+      if (opening.level !== 0) throw new Error("\u5217\u8868\u6216\u5F15\u7528\u4E2D\u7684\u56FE\u7247\u6682\u4E0D\u80FD\u81EA\u52A8\u5BFC\u5165\uFF0C\u8BF7\u628A\u56FE\u7247\u5355\u72EC\u653E\u6210\u6B63\u6587\u6BB5\u843D");
+      flush();
+      const active = [];
+      let chunk = [];
+      let hasText = false;
+      function flushChunk() {
+        if (!hasText) return;
+        const completed = [...chunk, ...active.slice().reverse().map((token) => ({ ...token, type: token.type.replace(/_open$/, "_close"), nesting: -1 }))];
+        const part = { ...inline2, children: completed };
+        segments.push({ type: "html", html: markdown.renderer.render([opening, part, tokens[position + 2]], markdown.options, {}), text: visibleText([part]) });
+        firstTextSeen = true;
+      }
+      for (const child of inline2.children) {
+        if (child.type === "image") {
+          flushChunk();
+          addImage({ src: child.attrGet("src"), alt: child.content || "" }, false);
+          firstTextSeen = true;
+          chunk = active.slice();
+          hasText = false;
+        } else {
+          chunk.push(child);
+          if (child.type.endsWith("_open")) active.push(child);
+          else if (child.type.endsWith("_close")) active.pop();
+          if (["text", "code_inline"].includes(child.type) && child.content.trim()) hasText = true;
+        }
+      }
+      flushChunk();
+      return true;
     }
     for (let i = 0; i < tokens.length; i++) {
       if (i === titleHeading) {
@@ -5317,16 +5372,14 @@
       }
       const imageParagraph = imageOnlyParagraph(tokens, i);
       if (imageParagraph) {
+        if (tokens[i].level !== 0) throw new Error("\u5217\u8868\u6216\u5F15\u7528\u4E2D\u7684\u56FE\u7247\u6682\u4E0D\u80FD\u81EA\u52A8\u5BFC\u5165\uFF0C\u8BF7\u628A\u56FE\u7247\u5355\u72EC\u653E\u6210\u6B63\u6587\u6BB5\u843D");
         flush();
-        for (const image2 of imageParagraph.images) {
-          if (!cover && !firstTextSeen) cover = { src: image2.src, alt: image2.alt };
-          else {
-            const item = { type: "image", src: image2.src, alt: image2.alt, number: images.length + 1 };
-            images.push(item);
-            segments.push(item);
-          }
-        }
+        for (const image2 of imageParagraph.images) addImage(image2, true);
         i += imageParagraph.tokenCount - 1;
+        continue;
+      }
+      if (splitMixedImageParagraph(i)) {
+        i += 2;
         continue;
       }
       const token = tokens[i];
@@ -5342,7 +5395,8 @@
         let end = i;
         while (end < tokens.length && tokens[end].type !== "table_close") end++;
         const raw = lines.slice(token.map?.[0] ?? 0, token.map?.[1] ?? 0).join("\n");
-        segments.push({ type: "table", markdown: raw, text: visibleText(tokens.slice(i, end + 1)) });
+        const tableTokens = tokens.slice(i, end + 1);
+        segments.push({ type: "table", markdown: raw, text: visibleText(tableTokens), rows: tableRows(tableTokens) });
         firstTextSeen = true;
         i = end;
         continue;
@@ -5372,6 +5426,14 @@
   var pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   var clean = (text2) => String(text2 || "").replace(/[\s\u200b\ufeff]+/g, "");
   var visible = (element) => element && element.getClientRects().length > 0;
+  function firstMissingContentStep(bundle, actualText) {
+    const normalized = clean(actualText);
+    return bundle.segments.findIndex((step) => {
+      if (step.type === "image" || step.type === "table") return false;
+      const expected = clean(step.text || step.code || "");
+      return expected && !normalized.includes(expected);
+    });
+  }
   async function waitFor(read, message, timeout = 2e4) {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
@@ -5422,6 +5484,20 @@
       window.postMessage({ source: "zhang-xmd", requestId, ...payload }, location.origin);
     });
   }
+  var extensionDisconnectedMessage = "\u63D2\u4EF6\u5DF2\u66F4\u65B0\u6216\u5931\u53BB\u8FDE\u63A5\uFF0C\u8BF7\u5237\u65B0 X \u9875\u9762\u540E\u91CD\u65B0\u9009\u62E9 Markdown";
+  async function extensionMessage(message) {
+    const runtime = globalThis.chrome?.runtime;
+    if (!runtime?.sendMessage) throw new Error(extensionDisconnectedMessage);
+    try {
+      return await runtime.sendMessage(message);
+    } catch (error2) {
+      const detail = String(error2?.message || error2 || "");
+      if (/context invalidated|receiving end does not exist|message port closed|cannot read.*sendMessage/i.test(detail)) {
+        throw new Error(extensionDisconnectedMessage);
+      }
+      throw new Error(`\u63D2\u4EF6\u901A\u4FE1\u5931\u8D25\uFF1A${detail || "\u672A\u77E5\u9519\u8BEF"}\u3002\u8BF7\u5237\u65B0 X \u9875\u9762\u540E\u91CD\u8BD5`);
+    }
+  }
   function expectedText(html) {
     return clean(new DOMParser().parseFromString(html, "text/html").body.textContent);
   }
@@ -5436,7 +5512,7 @@
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
       if (textLanded(before, expected)) {
-        await pause(220);
+        await pause(900);
         if (textLanded(before, expected)) return true;
       }
       await pause(80);
@@ -5466,7 +5542,7 @@
     await pause(80);
   }
   function findMenuItem(names) {
-    const items = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"]'));
+    const items = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"]')).filter(visible);
     const exact = items.find((element) => names.includes(element.textContent.trim()) || names.includes(element.getAttribute("aria-label") || ""));
     if (exact) return exact;
     return items.find((element) => {
@@ -5477,19 +5553,36 @@
       });
     });
   }
-  async function openInsert(names) {
-    await caretAtEnd();
-    const button = document.querySelector('button[aria-label="Add Media"], button[aria-label="\u6DFB\u52A0\u5A92\u4F53"]') || Array.from(document.querySelectorAll('button, [role="button"]')).find((element) => {
-      const label = (element.getAttribute("aria-label") || "").trim().toLowerCase();
-      return visible(element) && !element.disabled && (label.includes("add media") || label.includes("\u6DFB\u52A0\u5A92\u4F53"));
-    });
-    if (!button) throw new Error("\u6CA1\u6709\u627E\u5230 X \u7684 Insert \u83DC\u5355");
-    button.click();
-    const item = await waitFor(() => findMenuItem(names), `\u6CA1\u6709\u627E\u5230 ${names[0]} \u63D2\u5165\u9009\u9879`);
-    item.click();
+  async function openInsert(names, ready = null) {
+    const attempts = ready ? 3 : 1;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (ready?.()) return;
+      let item = findMenuItem(names);
+      if (!item) {
+        await caretAtEnd();
+        const button = document.querySelector('button[aria-label="Add Media"], button[aria-label="\u6DFB\u52A0\u5A92\u4F53"]') || Array.from(document.querySelectorAll('button, [role="button"]')).find((element) => {
+          const label = (element.getAttribute("aria-label") || "").trim().toLowerCase();
+          return visible(element) && !element.disabled && (label.includes("add media") || label.includes("\u6DFB\u52A0\u5A92\u4F53"));
+        });
+        if (!button) throw new Error("\u6CA1\u6709\u627E\u5230 X \u7684 Insert \u83DC\u5355");
+        button.click();
+        item = await waitFor(() => findMenuItem(names), `\u6CA1\u6709\u627E\u5230 ${names[0]} \u63D2\u5165\u9009\u9879`);
+      }
+      item.click();
+      if (!ready) return;
+      try {
+        await waitFor(ready, `${names[0]} \u7F16\u8F91\u7A97\u53E3\u672A\u51FA\u73B0`, 3500);
+        return;
+      } catch {
+      }
+    }
+    throw new Error(`X \u6CA1\u6709\u6253\u5F00 ${names[0]} \u7F16\u8F91\u7A97\u53E3\uFF0C\u5DF2\u91CD\u8BD5 ${attempts} \u6B21`);
   }
-  async function modal() {
-    return waitFor(() => Array.from(document.querySelectorAll('[role="dialog"]')).find(visible), "X \u63D2\u5165\u5F39\u7A97\u6CA1\u6709\u51FA\u73B0");
+  function dialogWith(selector, excludedFields = /* @__PURE__ */ new Set()) {
+    return Array.from(document.querySelectorAll('[role="dialog"]')).filter(visible).reverse().find((dialog) => {
+      const field = dialog.querySelector(selector);
+      return visible(field) && !excludedFields.has(field);
+    });
   }
   function assignFile(input, file) {
     const transfer = new DataTransfer();
@@ -5691,65 +5784,200 @@
   }
   async function insertCode(step) {
     const before = editor().querySelectorAll('[data-testid="markdown-code-block"]').length;
-    await openInsert(["Code", "\u4EE3\u7801"]);
-    const dialog = await modal();
-    const field = await waitFor(() => dialog.querySelector('textarea[name="code-input"]'), "\u6CA1\u6709\u627E\u5230\u4EE3\u7801\u8F93\u5165\u6846");
-    setValue(field, step.code);
+    const existingFields = new Set(document.querySelectorAll('textarea[name="code-input"]'));
+    const codeDialog = () => dialogWith('textarea[name="code-input"]', existingFields);
+    await openInsert(["Code", "\u4EE3\u7801"], codeDialog);
+    const dialog = codeDialog();
+    const field = dialog.querySelector('textarea[name="code-input"]');
+    await fillField(field, step.code);
+    if (field.value !== step.code) throw new Error("\u4EE3\u7801\u5185\u5BB9\u6CA1\u6709\u5199\u8FDB\u8F93\u5165\u6846");
     const language = { shell: "bash", sh: "bash", js: "javascript", ts: "typescript", py: "python" }[step.language.toLowerCase()] || step.language;
     const languageInput = dialog.querySelector('input[name="programming-language-input"]');
     if (languageInput && language) {
-      setValue(languageInput, language);
+      await fillField(languageInput, language);
       try {
         const choice = await waitFor(() => Array.from(dialog.querySelectorAll("button")).find((button) => button.textContent.trim().toLowerCase() === language.toLowerCase()), "\u6B64\u4EE3\u7801\u8BED\u8A00\u6CA1\u6709\u5339\u914D\u9879", 3e3);
         choice.click();
       } catch {
-        setValue(languageInput, "");
+        await fillField(languageInput, "");
       }
     }
     const insert = await waitFor(() => textButton(dialog, ["Insert", "\u63D2\u5165"]), "\u4EE3\u7801\u5757\u63D2\u5165\u6309\u94AE\u672A\u5C31\u7EEA");
     insert.click();
-    await waitFor(() => editor().querySelectorAll('[data-testid="markdown-code-block"]').length > before, "\u4EE3\u7801\u5757\u6CA1\u6709\u8FDB\u5165\u6B63\u6587");
+    await waitFor(() => {
+      const blocks = Array.from(editor().querySelectorAll('[data-testid="markdown-code-block"]'));
+      return blocks.length > before && clean(blocks.at(-1).innerText).includes(clean(step.code));
+    }, "\u4EE3\u7801\u5757\u5185\u5BB9\u6CA1\u6709\u8FDB\u5165\u6B63\u6587");
+  }
+  function isOneByOneTableLabel(label) {
+    const text2 = String(label || "").replace(/\s+/g, " ").trim();
+    if (!text2) return false;
+    if (/insert a 1 by 1 table/i.test(text2)) return true;
+    if (/1\s*行\s*1\s*列/.test(text2) && !/1\s*行\s*1\s*列\d/.test(text2) && !/\d1\s*行/.test(text2)) return true;
+    return /(?:^|[^0-9])1\s*(?:by|x|×|\*|乘)\s*1(?:\s*(?:的)?\s*(?:table|表格|列))?(?:\s|$)/i.test(text2) && !/(?:^|[^0-9])1\s*(?:by|x|×|\*|乘)\s*1\d/i.test(text2);
+  }
+  function tableControlLabel(element) {
+    return `${element.getAttribute("aria-label") || ""} ${element.getAttribute("title") || ""}`;
+  }
+  function pointAt(element) {
+    const rect = element.getBoundingClientRect();
+    const init = { bubbles: true, cancelable: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+    element.dispatchEvent(new MouseEvent("mouseover", init));
+    element.dispatchEvent(new MouseEvent("mousemove", init));
+  }
+  function findSizeCell(root, { allowUnlabeledGrid = false } = {}) {
+    if (!root?.querySelectorAll) return null;
+    const nodes = Array.from(root.querySelectorAll('button, [role="button"], [role="gridcell"]'));
+    const labeled = nodes.find((element) => visible(element) && isOneByOneTableLabel(tableControlLabel(element)));
+    if (labeled) return labeled;
+    if (!allowUnlabeledGrid) return null;
+    const grid = root.getAttribute?.("role") === "grid" ? root : root.querySelector('[role="grid"]');
+    const cell = grid && Array.from(grid.querySelectorAll('button, [role="button"], [role="gridcell"], td')).find(visible);
+    if (cell) return cell;
+    const squares = nodes.filter((element) => {
+      if (!visible(element)) return false;
+      const rect = element.getBoundingClientRect();
+      return rect.width >= 10 && rect.width <= 40 && rect.height >= 10 && rect.height <= 40 && Math.abs(rect.width - rect.height) < 8;
+    });
+    if (squares.length < 9) return null;
+    const rows = new Set(squares.map((element) => Math.round(element.getBoundingClientRect().top / 10))).size;
+    if (rows < 3) return null;
+    squares.sort((a, b) => {
+      const ra = a.getBoundingClientRect();
+      const rb = b.getBoundingClientRect();
+      return ra.top - rb.top || ra.left - rb.left;
+    });
+    return squares[0];
+  }
+  function findTableSurface(knownDialogs) {
+    const fresh = [
+      ...Array.from(document.querySelectorAll('[role="dialog"]')).filter((element) => visible(element) && !knownDialogs.has(element)),
+      ...Array.from(document.querySelectorAll('[role="menu"]')).filter(visible)
+    ];
+    for (const surface of fresh) {
+      const cell = findSizeCell(surface, { allowUnlabeledGrid: true });
+      if (cell) return { kind: "cell", cell, root: surface };
+      const field = Array.from(surface.querySelectorAll('textarea[name="markdown-input"]')).find(visible);
+      if (field) return { kind: "markdown", field, root: surface };
+    }
+    for (const dialog of Array.from(document.querySelectorAll('[role="dialog"]')).filter(visible)) {
+      const cell = findSizeCell(dialog, { allowUnlabeledGrid: false });
+      if (cell) return { kind: "cell", cell, root: dialog };
+    }
+    return null;
+  }
+  function editorBlocks() {
+    return Array.from(editor().querySelectorAll('[data-block="true"]'));
+  }
+  function editableTailBlock() {
+    return editorBlocks().filter((block2) => block2.getAttribute("contenteditable") !== "false").at(-1) || null;
+  }
+  function editorContentText() {
+    return clean(editorBlocks().filter((block2) => !block2.querySelector("img")).map((block2) => block2.innerText || "").join(""));
+  }
+  function isTableBlock(block2) {
+    if (!block2) return false;
+    if (block2.querySelector('table, [role="table"], [role="grid"] td, td')) return true;
+    return /table/i.test(`${block2.getAttribute("data-testid") || ""} ${block2.getAttribute("aria-label") || ""}`);
+  }
+  function tableSnapshot() {
+    return {
+      blocks: new Set(editorBlocks()),
+      count: editorBlocks().filter(isTableBlock).length
+    };
+  }
+  function locateNewTable(snapshot) {
+    const blocks = editorBlocks();
+    const fresh = blocks.find((block2) => !snapshot.blocks.has(block2) && isTableBlock(block2));
+    if (fresh) return fresh;
+    if (blocks.filter(isTableBlock).length > snapshot.count) return blocks.filter(isTableBlock).at(-1) || null;
+    return null;
+  }
+  function dialogWithTableField() {
+    return dialogWith('textarea[name="markdown-input"]');
+  }
+  function tableMatches(section, step) {
+    const rows = Array.from(section?.querySelector("table")?.querySelectorAll("tr") || []).map((row) => Array.from(row.querySelectorAll("th, td")).map((cell) => clean(cell.innerText)));
+    const expected = step.rows || [];
+    return expected.length > 0 && rows.length === expected.length && rows.every((row, index) => row.length === expected[index].length && row.every((cell, column) => cell === clean(expected[index][column])));
+  }
+  async function fillField(field, value) {
+    document.querySelectorAll("[data-zhang-xmd-target]").forEach((node) => node.removeAttribute("data-zhang-xmd-target"));
+    field.setAttribute("data-zhang-xmd-target", "1");
+    try {
+      await pageCommand({ action: "fill", value }, 2e3);
+    } finally {
+      field.removeAttribute("data-zhang-xmd-target");
+    }
+    if (field.value !== value) setValue(field, value);
+  }
+  async function pressTableButton(root) {
+    const names = ["Update", "\u66F4\u65B0", "Insert", "\u63D2\u5165", "Save", "\u4FDD\u5B58", "Add", "\u6DFB\u52A0"];
+    const deadline = Date.now() + 2500;
+    while (Date.now() < deadline) {
+      const button = textButton(root, names);
+      if (button) {
+        button.click();
+        return true;
+      }
+      await pause(80);
+    }
+    return false;
+  }
+  async function fillTableDialog(root, field, markdown2) {
+    await fillField(field, markdown2);
+    if (field.value !== markdown2) throw new Error("\u8868\u683C\u5185\u5BB9\u6CA1\u6709\u5199\u8FDB\u7F16\u8F91\u6846");
+    await pause(120);
+    if (!await pressTableButton(root)) throw new Error("\u8868\u683C\u63D2\u5165\u6309\u94AE\u672A\u5C31\u7EEA");
   }
   async function insertTable(step) {
-    const before = new Set(Array.from(editor().querySelectorAll('section[data-block="true"]')).map((section2) => section2.getAttribute("data-offset-key")));
-    await openInsert(["Table", "\u8868\u683C"]);
-    const dialog = await modal();
-    const picker = dialog.querySelector('button[aria-label="Insert a 1 by 1 table"]') || Array.from(dialog.querySelectorAll("button")).find((button) => /1.*1.*(?:table|表格)/i.test(button.getAttribute("aria-label") || ""));
-    if (!picker) throw new Error("\u6CA1\u6709\u627E\u5230 X \u8868\u683C\u5C3A\u5BF8\u9009\u62E9\u5668");
-    picker.click();
-    const section = await waitFor(() => Array.from(editor().querySelectorAll('section[data-block="true"]')).find((item) => !before.has(item.getAttribute("data-offset-key")) && item.querySelector("table")), "\u8868\u683C\u6CA1\u6709\u8FDB\u5165\u6B63\u6587");
-    const sectionKey = section.getAttribute("data-offset-key");
-    const edit = section.querySelector('button[aria-label="Edit block"],button[aria-label="\u7F16\u8F91\u533A\u5757"]');
+    const snapshot = tableSnapshot();
+    const knownDialogs = new Set(document.querySelectorAll('[role="dialog"]'));
+    const tableSurface = () => findTableSurface(knownDialogs);
+    await openInsert(["Table", "\u8868\u683C"], tableSurface);
+    const surface = tableSurface();
+    if (surface.kind === "markdown") {
+      await fillTableDialog(surface.root, surface.field, step.markdown);
+    } else {
+      surface.cell.click();
+    }
+    const section = await waitFor(() => locateNewTable(snapshot), "\u8868\u683C\u6CA1\u6709\u8FDB\u5165\u6B63\u6587", 12e3);
+    if (tableMatches(section, step)) return;
+    pointAt(section);
+    await pause(120);
+    const edit = section.querySelector('button[aria-label="Edit block"], button[aria-label="\u7F16\u8F91\u533A\u5757"], [role="button"][aria-label="Edit block"], [role="button"][aria-label="\u7F16\u8F91\u533A\u5757"]') || Array.from(section.querySelectorAll('button, [role="button"]')).find((element) => /edit block|编辑区块|^edit$|^编辑$/i.test((element.getAttribute("aria-label") || "").trim()));
     if (!edit) throw new Error("\u6CA1\u6709\u627E\u5230\u8868\u683C\u7F16\u8F91\u6309\u94AE");
     edit.click();
-    const editDialog = await modal();
-    const field = await waitFor(() => editDialog.querySelector("textarea"), "\u6CA1\u6709\u627E\u5230 Markdown \u8868\u683C\u8F93\u5165\u6846");
-    setValue(field, step.markdown);
-    const update = await waitFor(() => textButton(editDialog, ["Update", "\u66F4\u65B0"]), "\u8868\u683C\u66F4\u65B0\u6309\u94AE\u672A\u5C31\u7EEA");
-    update.click();
+    const editDialog = await waitFor(() => dialogWithTableField(), "\u6CA1\u6709\u627E\u5230 Markdown \u8868\u683C\u8F93\u5165\u6846");
+    await fillTableDialog(editDialog, editDialog.querySelector('textarea[name="markdown-input"]'), step.markdown);
     await waitFor(() => !document.contains(editDialog), "\u8868\u683C\u7F16\u8F91\u5F39\u7A97\u6CA1\u6709\u5173\u95ED");
-    await waitFor(() => {
-      const updated = Array.from(editor().querySelectorAll('section[data-block="true"]')).find((item) => item.getAttribute("data-offset-key") === sectionKey);
-      return updated && clean(updated.textContent).length > 0;
-    }, "\u8868\u683C\u5185\u5BB9\u672A\u4FDD\u5B58");
+    await waitFor(() => tableMatches(section, step), "\u8868\u683C\u5185\u5BB9\u672A\u5B8C\u6574\u4FDD\u5B58");
   }
   async function insertImage(file) {
     const before = editorImages().length;
-    await openInsert(["Media", "\u5A92\u4F53"]);
-    const dialog = await modal();
-    const input = await waitFor(() => dialog.querySelector('input[type="file"]'), "\u6CA1\u6709\u627E\u5230\u6B63\u6587\u56FE\u7247\u4E0A\u4F20\u5165\u53E3");
+    const existingFields = new Set(document.querySelectorAll('[role="dialog"] input[type="file"]'));
+    const mediaDialog = () => dialogWith('input[type="file"]', existingFields);
+    await openInsert(["Media", "\u5A92\u4F53"], mediaDialog);
+    const dialog = mediaDialog();
+    const input = dialog.querySelector('input[type="file"]');
     assignFile(input, file);
     await waitFor(() => editorImages().length > before, "\u6B63\u6587\u56FE\u7247\u6CA1\u6709\u5B8C\u6210\u4E0A\u4F20", 6e4);
     await settleMedia();
+    let tail = await waitFor(() => editableTailBlock(), "\u56FE\u7247\u540E\u6CA1\u6709\u51FA\u73B0\u53EF\u7EE7\u7EED\u5199\u5165\u7684\u6B63\u6587\u4F4D\u7F6E");
+    await pause(1e3);
+    if (!document.contains(tail) || editableTailBlock() !== tail) {
+      tail = await waitFor(() => editableTailBlock(), "\u56FE\u7247\u540E\u7684\u6B63\u6587\u4F4D\u7F6E\u5C1A\u672A\u7A33\u5B9A");
+      await pause(1e3);
+      if (!document.contains(tail) || editableTailBlock() !== tail) throw new Error("\u56FE\u7247\u540E\u7684\u6B63\u6587\u4F4D\u7F6E\u6301\u7EED\u53D8\u5316\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+    }
   }
   async function insertCover(file) {
     const input = document.querySelector('input[type="file"][data-testid="fileInput"]');
     if (!input) throw new Error("\u6CA1\u6709\u627E\u5230\u6587\u7AE0\u5C01\u9762\u4E0A\u4F20\u5165\u53E3");
     assignFile(input, file);
-    const dialog = await modal();
-    const apply = await waitFor(() => textButton(dialog, ["Apply", "\u5E94\u7528", "Done", "\u5B8C\u6210", "Save", "\u4FDD\u5B58"]), "\u5C01\u9762\u88C1\u526A\u6309\u94AE\u672A\u5C31\u7EEA", 3e4);
-    apply.click();
-    await waitFor(() => !document.contains(dialog), "\u5C01\u9762\u88C1\u526A\u5F39\u7A97\u6CA1\u6709\u5173\u95ED");
+    const apply = await waitFor(() => Array.from(document.querySelectorAll('[role="dialog"]')).filter(visible).map((dialog) => ({ dialog, button: textButton(dialog, ["Apply", "\u5E94\u7528", "Done", "\u5B8C\u6210", "Save", "\u4FDD\u5B58"]) })).find((item) => item.button), "\u5C01\u9762\u88C1\u526A\u6309\u94AE\u672A\u5C31\u7EEA", 3e4);
+    apply.button.click();
+    await waitFor(() => !document.contains(apply.dialog), "\u5C01\u9762\u88C1\u526A\u5F39\u7A97\u6CA1\u6709\u5173\u95ED");
     await settleMedia();
   }
   async function fetchImageFile(src, localFiles = []) {
@@ -5765,10 +5993,17 @@
       if (matches.length !== 1) throw new Error(matches.length ? `\u672C\u5730\u56FE\u7247\u91CD\u540D\uFF0C\u8BF7\u4FDD\u7559\u552F\u4E00\u6587\u4EF6\uFF1A${name}` : `\u7F3A\u5C11\u672C\u5730\u56FE\u7247\uFF1A${name}\uFF0C\u8BF7\u7528\u300C\u9009\u62E9\u672C\u5730\u56FE\u7247\u300D\u6DFB\u52A0`);
       return matches[0];
     }
-    const response = await chrome.runtime.sendMessage({ type: "xmd:fetch-image", url: src });
+    const response = await extensionMessage({ type: "xmd:fetch-image", url: src });
     if (!response?.ok) throw new Error(response?.error || "\u56FE\u7247\u4E0B\u8F7D\u5931\u8D25");
     const bytes = Uint8Array.from(atob(response.base64), (char) => char.charCodeAt(0));
     return new File([bytes], response.filename, { type: response.type });
+  }
+  function validateImageFile(file, { cover = false } = {}) {
+    const type = file.type || { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif" }[file.name.split(".").pop().toLowerCase()];
+    const allowed = cover ? ["image/png", "image/jpeg", "image/webp"] : ["image/png", "image/jpeg", "image/webp", "image/gif"];
+    if (!allowed.includes(type)) throw new Error(`${file.name} \u683C\u5F0F\u4E0D\u53D7 X ${cover ? "\u5C01\u9762" : "\u6B63\u6587\u56FE\u7247"}\u652F\u6301\uFF0C\u8BF7\u4F7F\u7528 ${cover ? "PNG\u3001JPEG \u6216 WebP" : "PNG\u3001JPEG\u3001WebP \u6216 GIF"}`);
+    if (file.size > 20 * 1024 * 1024) throw new Error(`${file.name} \u8D85\u8FC7 20 MB\uFF0C\u8BF7\u538B\u7F29\u540E\u91CD\u8BD5`);
+    return file;
   }
   function titleField() {
     return document.querySelector('textarea[name="Article Title"]');
@@ -5805,6 +6040,8 @@
       if (signal?.aborted) throw new Error("\u5BFC\u5165\u5DF2\u505C\u6B62\uFF0C\u5F53\u524D\u8349\u7A3F\u5DF2\u4FDD\u7559");
     };
     ensureActive();
+    const connection = await extensionMessage({ type: "xmd:ping" });
+    if (!connection?.ok) throw new Error(extensionDisconnectedMessage);
     onProgress("\u6B63\u5728\u51C6\u5907\u6587\u7AE0\u56FE\u7247\u2026");
     const sources = [...new Set([bundle.cover?.src, ...bundle.images.map((image2) => image2.src)].filter(Boolean))];
     const files = /* @__PURE__ */ new Map();
@@ -5812,6 +6049,7 @@
       ensureActive();
       files.set(src, await fetchImageFile(src, localFiles));
     }
+    for (const [src, file] of files) validateImageFile(file, { cover: bundle.cover?.src === src });
     ensureActive();
     onProgress("\u6B63\u5728\u65B0\u5EFA X Article \u8349\u7A3F\u2026");
     await ensureDraft();
@@ -5828,10 +6066,14 @@
       const step = bundle.segments[index];
       const label = { html: "\u6B63\u6587", image: "\u56FE\u7247", code: "\u4EE3\u7801\u5757", table: "\u8868\u683C" }[step.type];
       onProgress(`\u6B63\u5728\u5BFC\u5165 ${index + 1}/${bundle.segments.length}\uFF1A${label}`);
-      if (step.type === "html") await insertHtml(step);
-      else if (step.type === "code") await insertCode(step);
-      else if (step.type === "table") await insertTable(step);
-      else if (step.type === "image") await insertImage(files.get(step.src));
+      try {
+        if (step.type === "html") await insertHtml(step);
+        else if (step.type === "code") await insertCode(step);
+        else if (step.type === "table") await insertTable(step);
+        else if (step.type === "image") await insertImage(files.get(step.src));
+      } catch (error2) {
+        throw new Error(`\u7B2C ${index + 1}/${bundle.segments.length} \u6B65\uFF08${label}\uFF09\u5931\u8D25\uFF1A${error2.message}\u3002\u5F53\u524D\u8349\u7A3F\u5DF2\u4FDD\u7559`);
+      }
       await pause(200);
     }
     await waitFor(() => !/Saving|正在保存|保存中/i.test(document.querySelector("#detail-header")?.textContent || ""), "X \u5C1A\u672A\u786E\u8BA4\u4FDD\u5B58\uFF0C\u8BF7\u7A0D\u540E\u67E5\u770B\u8349\u7A3F", 3e4);
@@ -5839,6 +6081,8 @@
     const tableCount = editor().querySelectorAll("section table").length;
     const imageCount = editorImages().length;
     if (codeCount !== bundle.statistics.code || tableCount !== bundle.statistics.tables || imageCount < bundle.statistics.images) throw new Error("\u5BFC\u5165\u540E\u6570\u91CF\u6838\u5BF9\u4E0D\u4E00\u81F4\uFF0C\u8BF7\u68C0\u67E5\u8349\u7A3F\u4E2D\u7684\u56FE\u7247\u3001\u4EE3\u7801\u6216\u8868\u683C");
+    const missingTextStep = firstMissingContentStep(bundle, editorContentText());
+    if (missingTextStep >= 0) throw new Error(`\u5BFC\u5165\u540E\u53D1\u73B0\u7B2C ${missingTextStep + 1}/${bundle.segments.length} \u6B65\u6B63\u6587\u7F3A\u5931\uFF0C\u5DF2\u4FDD\u7559\u8349\u7A3F\uFF0C\u8BF7\u4E0D\u8981\u76F4\u63A5\u53D1\u5E03`);
     return { url: location.href, codeCount, tableCount, imageCount };
   }
 
@@ -5870,9 +6114,10 @@
       panel?.remove();
       panel = document.createElement("aside");
       panel.id = "zhang-xmd-panel";
+      const version = globalThis.chrome?.runtime?.getManifest?.().version || "dev";
       panel.innerHTML = `
       <header class="zhang-xmd-header">
-        <div><strong>Markdown \u2192 X Articles</strong><small>\u9009\u62E9\u6587\u7AE0\uFF0C\u81EA\u52A8\u751F\u6210 X \u8349\u7A3F</small></div>
+        <div><strong>Markdown \u2192 X Articles</strong><small>\u7248\u672C ${escapeHtml2(version)} \xB7 \u9009\u62E9\u6587\u7AE0\uFF0C\u81EA\u52A8\u751F\u6210 X \u8349\u7A3F</small></div>
         <button type="button" data-action="close" aria-label="\u5173\u95ED">\xD7</button>
       </header>
       <div class="zhang-xmd-body">

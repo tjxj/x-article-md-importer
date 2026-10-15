@@ -161,6 +161,47 @@ if (!window.__zhangXmdBridge) {
     return { ok: false, reason: '编辑器未写入这段正文' };
   }
 
+  function findReactHandler(element, names) {
+    const fromProps = props => {
+      if (!props) return null;
+      for (const name of names) if (typeof props[name] === 'function') return props[name];
+      return null;
+    };
+    let fiber = fiberOf(element);
+    const seen = new Set();
+    let depth = 0;
+    while (fiber && !seen.has(fiber) && depth < 8) {
+      seen.add(fiber);
+      const found = fromProps(fiber.memoizedProps);
+      if (found) return found;
+      fiber = fiber.return;
+      depth += 1;
+    }
+    const propsKey = Object.keys(element).find(name => name.startsWith('__reactProps$'));
+    return propsKey ? fromProps(element[propsKey]) : null;
+  }
+
+  function fillTarget(value) {
+    const element = document.querySelector('[data-zhang-xmd-target="1"]');
+    if (!element) return { ok: false, reason: '没有找到表格输入框' };
+    const prototype = element.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+    if (setter) setter.call(element, value);
+    else element.value = value;
+    if (element._valueTracker) element._valueTracker.setValue('');
+    element.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+    const handler = findReactHandler(element, ['onChange', 'onInput']);
+    if (handler) {
+      try {
+        handler({ target: element, currentTarget: element, preventDefault() {}, stopPropagation() {}, nativeEvent: { target: element } });
+      } catch (error) {
+        return { ok: false, reason: error.message };
+      }
+    }
+    return { ok: element.value === value };
+  }
+
   window.addEventListener('message', event => {
     if (event.source !== window || event.origin !== location.origin) return;
     const data = event.data;
@@ -168,6 +209,10 @@ if (!window.__zhangXmdBridge) {
     const reply = payload => window.postMessage({ source: 'zhang-xmd-result', requestId: data.requestId, ...payload }, location.origin);
     if (data.action === 'caret') {
       reply({ ok: moveCaretToEnd() });
+      return;
+    }
+    if (data.action === 'fill') {
+      reply(fillTarget(String(data.value || '')));
       return;
     }
     if (data.action === 'paste') {

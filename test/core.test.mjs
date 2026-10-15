@@ -12,6 +12,7 @@ test('拆开封面、正文图、代码和原生表格，保留富文本', () =>
   assert.match(bundle.segments[0].html, /<strong>加粗<\/strong>/);
   assert.match(bundle.segments[0].html, /href="https:\/\/example.com"/);
   assert.match(bundle.segments.find(x => x.type === 'table').markdown, /\| 1 \| 2 \|/);
+  assert.deepEqual(bundle.segments.find(x => x.type === 'table').rows, [['A', 'B'], ['1', '2']]);
   assert.equal(bundle.segments.find(x => x.type === 'code').code, 'echo ok');
   assert.match(inlineRichHtml(bundle), /【图片1：插图】/);
   assert.doesNotMatch(inlineRichHtml(bundle), /title: \.md/);
@@ -39,6 +40,47 @@ test('同一段里连续的图片都拆成独立图片步骤', () => {
   ]);
   assert.deepEqual(bundle.segments.map(segment => segment.type), ['html', 'image', 'image', 'html']);
   assert.equal(bundle.segments.some(segment => segment.html?.includes('<img')), false);
+});
+
+test('文字和图片混排时保持顺序，并把图片作为正文图片', () => {
+  const bundle = convertMarkdown('先读 **说明** ![图](https://r2.zhanglearning.com/a.png) 再看结论', 'article.md');
+  assert.equal(bundle.cover, null);
+  assert.deepEqual(bundle.segments.map(segment => segment.type), ['html', 'image', 'html']);
+  assert.match(bundle.segments[0].html, /<strong>说明<\/strong>/);
+  assert.match(bundle.segments[2].html, /再看结论/);
+  assert.equal(bundle.segments.some(segment => segment.html?.includes('<img')), false);
+});
+
+test('列表里的图片在解析时给出明确提示', () => {
+  assert.throws(() => convertMarkdown('- ![图](https://r2.zhanglearning.com/a.png)', 'article.md'), /列表或引用中的图片/);
+});
+
+test('只把 1×1 认作表格尺寸入口', async () => {
+  const { isOneByOneTableLabel } = await import('../src/x-adapter.js');
+  for (const label of ['Insert a 1 by 1 table', '插入 1 × 1 表格', '插入一个 1x1 表格', '1 行 1 列', '1 by 1']) {
+    assert.equal(isOneByOneTableLabel(label), true, label);
+  }
+  for (const label of ['Insert a 2 by 3 table', '插入 2 × 3 表格', 'Insert a 10 by 1 table', 'Insert a 1 by 10 table', '1 行 2 列', '表格']) {
+    assert.equal(isOneByOneTableLabel(label), false, label);
+  }
+});
+
+test('从 Markdown 表格取出单元格文字，跳过分隔行', async () => {
+  const { markdownCells } = await import('../src/x-adapter.js');
+  assert.deepEqual(markdownCells('| 测试基准 | 分数 |\n| --- | --- |\n| AIME | 79.2 |'), ['测试基准', '分数', 'AIME', '79.2']);
+});
+
+test('表格保留单元格顺序、重复值和转义竖线', () => {
+  const bundle = convertMarkdown('| 项目 | 项目 |\n| --- | --- |\n| A\\|B | 42 |', 'article.md');
+  assert.deepEqual(bundle.segments[0].rows, [['项目', '项目'], ['A|B', '42']]);
+});
+
+test('图片在建草稿前检查封面格式和大小', async () => {
+  const { validateImageFile } = await import('../src/x-adapter.js');
+  assert.doesNotThrow(() => validateImageFile(new File(['ok'], 'cover.webp', { type: 'image/webp' }), { cover: true }));
+  assert.throws(() => validateImageFile(new File(['gif'], 'cover.gif', { type: 'image/gif' }), { cover: true }), /封面支持/);
+  assert.throws(() => validateImageFile(new File(['svg'], 'chart.svg', { type: 'image/svg+xml' })), /正文图片支持/);
+  assert.throws(() => validateImageFile({ name: 'large.png', type: 'image/png', size: 21 * 1024 * 1024 }), /20 MB/);
 });
 
 test('将反引号包裹的完整网址变成可点击链接', () => {

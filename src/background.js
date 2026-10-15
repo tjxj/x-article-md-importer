@@ -12,6 +12,10 @@ function imageType(bytes, header) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  if (message?.type === 'xmd:ping') {
+    respond({ ok: true, version: chrome.runtime.getManifest().version });
+    return;
+  }
   if (message?.type !== 'xmd:fetch-image') return;
   (async () => {
     if (!sender.url?.startsWith('https://x.com/')) throw new Error('只允许 X 页面读取文章图片');

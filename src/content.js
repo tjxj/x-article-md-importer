@@ -70,9 +70,10 @@ if (!document.getElementById('zhang-xmd-launcher')) {
     panel?.remove();
     panel = document.createElement('aside');
     panel.id = 'zhang-xmd-panel';
+    const version = globalThis.chrome?.runtime?.getManifest?.().version || 'dev';
     panel.innerHTML = `
       <header class="zhang-xmd-header">
-        <div><strong>Markdown → X Articles</strong><small>选择文章，自动生成 X 草稿</small></div>
+        <div><strong>Markdown → X Articles</strong><small>版本 ${escapeHtml(version)} · 选择文章，自动生成 X 草稿</small></div>
         <button type="button" data-action="close" aria-label="关闭">×</button>
       </header>
       <div class="zhang-xmd-body">
